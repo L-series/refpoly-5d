@@ -1,0 +1,516 @@
+\documentclass{amsart}
+\usepackage{amsmath, amssymb, amsthm, hyperref, tikz}
+
+\title{The Kreuzer--Skarke Classification Programme \\
+       for Reflexive Polytopes}
+\author{Personalized Notes (companion to \texttt{refpoly-5d})}
+\date{\today}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+\newtheorem{remark}[theorem]{Remark}
+
+\begin{document}
+
+\begin{abstract}
+These notes are a standalone companion to \texttt{theory\_notes.tex}. They
+develop, from first principles, the structural backbone of the
+Kreuzer--Skarke (KS) classification of reflexive polytopes: why the count
+is finite in each dimension, why every reflexive polytope sits inside a
+\emph{maximal} one, how maximal polytopes are polar-dual to \emph{minimal}
+ones, how minimal polytopes decompose as simplices or products of
+simplices, and how these are bounded and constructed from \emph{weight
+systems}. Throughout we keep the eventual computational target in view:
+the complete $d=4$ enumeration of $473\,800\,776$ reflexive polytopes, and
+the open frontier in $d=5$ addressed by \texttt{refpoly-5d}.
+We use the conventions of the companion notes: dual lattices
+$M,N \cong \mathbb{Z}^d$, real extensions $M_{\mathbb{R}},N_{\mathbb{R}}$,
+pairing $\langle\,\cdot\,,\,\cdot\,\rangle$, and polar dual $\Delta^*$
+(Definition in the companion document, Batyrev 1994). Recall a lattice
+polytope $\Delta \subset M_{\mathbb{R}}$ with $0$ in its interior is
+\emph{reflexive} iff $\Delta^*$ is also a lattice polytope, equivalently iff
+$\Delta$ has exactly one interior lattice point.
+\end{abstract}
+
+\maketitle
+\tableofcontents
+
+%==============================================================
+\section{Overview of the programme and its computational shape}
+%==============================================================
+
+The Kreuzer--Skarke programme is the answer to a deceptively simple
+question: \emph{list all reflexive polytopes in dimension $d$, up to
+$GL(d,\mathbb{Z})$ equivalence}. The completed tally is
+\begin{equation}\label{eq:counts}
+  d=1:\ 1, \qquad d=2:\ 16, \qquad d=3:\ 4319,
+  \qquad d=4:\ 473\,800\,776,
+\end{equation}
+with $d=5$ presently unclassified (the target of \texttt{refpoly-5d}).
+The explosive growth in~\eqref{eq:counts} is precisely why a naive
+enumeration is hopeless and why the programme is organized around the
+following chain of reductions, each a section below:
+
+\begin{enumerate}
+  \item[(F)] \textbf{Finiteness.} There are only finitely many reflexive
+        polytopes in each dimension (Section~\ref{sec:finite}). This makes
+        the problem well-posed and gives crude a~priori size bounds.
+  \item[(S)] \textbf{Subpolytope reduction.} Every reflexive polytope is a
+        subpolytope of a \emph{maximal} reflexive polytope
+        (Section~\ref{sec:sub}). So it suffices to find all maximal ones
+        and enumerate their reflexive subpolytopes.
+  \item[(D)] \textbf{Max/min duality.} Maximal reflexive polytopes are
+        exactly the polar duals of \emph{minimal} reflexive polytopes
+        (Section~\ref{sec:dual}). So it suffices to find all minimal ones.
+  \item[(M)] \textbf{Decomposition of minimal polytopes.} Minimal reflexive
+        polytopes are simplices, or convex hulls built from
+        lower-dimensional simplices ("products of simplices")
+        (Section~\ref{sec:min}).
+  \item[(W)] \textbf{Weight systems.} The minimal building blocks are
+        enumerated from \emph{weight systems} $q=(q_0,\dots,q_d)$ with the
+        interior-point property; products of simplices come from
+        \emph{combined} weight systems (Section~\ref{sec:weights}).
+\end{enumerate}
+
+\noindent The actual KS computation runs this chain \emph{in reverse}:
+enumerate weight systems $\to$ build minimal polytopes $\to$ dualize to
+get maximal polytopes $\to$ enumerate reflexive subpolytopes $\to$
+normal-form and deduplicate. The \texttt{refpoly-5d} pipeline implements
+the bracketing steps (weight-system input, $GL(d,\mathbb{Z})$ normal forms
+via PALP, and deduplication) for $d=5$.
+
+%==============================================================
+\section{Finiteness}\label{sec:finite}
+%==============================================================
+
+\subsection{The statement}
+
+\begin{theorem}[Finiteness; Lagarias--Ziegler 1991]\label{thm:finite}
+For each fixed $d$, the number of reflexive polytopes in $\mathbb{R}^d$,
+up to the action of $GL(d,\mathbb{Z})$ (and lattice translation), is finite.
+\end{theorem}
+
+This is the indispensable foundation: without it, "classify all reflexive
+polytopes in dimension $d$" would not even be a finite problem. It rests on
+two pillars --- a \emph{volume bound} for lattice polytopes with interior
+points, and a \emph{boundedness} (up to $GL(d,\mathbb{Z})$) of lattice
+polytopes of bounded volume.
+
+\subsection{Volume bounds: Hensley and Lagarias--Ziegler}
+
+The first pillar controls how big a reflexive polytope can be.
+
+\begin{theorem}[Hensley 1983; Lagarias--Ziegler 1991]\label{thm:hensley}
+There is a constant $c(d,k)$ such that any $d$-dimensional lattice polytope
+$P \subset \mathbb{R}^d$ with exactly $k \geq 1$ interior lattice points has
+normalized volume
+\begin{equation}
+  \operatorname{Vol}(P) \;\leq\; c(d,k).
+\end{equation}
+In particular a reflexive polytope ($k=1$ interior point) has volume bounded
+by a constant depending only on $d$.
+\end{theorem}
+
+\begin{remark}[Why an interior point forces boundedness]
+The intuition is a "no room to grow" principle. If a lattice polytope $P$
+has an interior lattice point $p$ but is very long and thin (large volume,
+few interior points), then by a pigeonhole/convexity argument one can
+exhibit \emph{additional} interior lattice points: a sufficiently elongated
+lattice polytope around $p$ must swallow a lattice point in its relative
+interior in some direction. Hensley's theorem quantifies this: fixing the
+number of interior points $k$ caps the volume. The original Hensley bound was
+doubly exponential; Lagarias--Ziegler sharpened the argument and, crucially
+for us, drew the classification consequence. Explicit values are large
+(e.g.\ the maximal reflexive simplex volumes grow like the Sylvester
+sequence; in $d$ dimensions the largest reflexive simplex is associated with
+weights $(1,1,2,3,7,42,\dots)$-type "Sylvester" data), but \emph{finite}.
+\end{remark}
+
+\subsection{From volume bound to finiteness}
+
+The second pillar converts "bounded volume" into "finitely many up to
+$GL(d,\mathbb{Z})$".
+
+\begin{lemma}[Bounded volume $\Rightarrow$ finiteness up to $GL(d,\mathbb{Z})$]
+\label{lem:boundedfinite}
+For fixed $d$ and fixed bound $V$, there are only finitely many lattice
+polytopes $P \subset \mathbb{R}^d$ with $\operatorname{Vol}(P) \leq V$ and a
+lattice point in the interior, up to $GL(d,\mathbb{Z})$ and translation.
+\end{lemma}
+
+\begin{proof}[Mechanism]
+Translate the interior lattice point to the origin. A theorem in the
+geometry of numbers (a quantitative form of "a lattice polytope of bounded
+volume can be put into a box of bounded size") shows $P$ is
+$GL(d,\mathbb{Z})$-equivalent to a polytope contained in a fixed finite box
+$[-R,R]^d$ with $R=R(d,V)$. Lattice polytopes inside a fixed finite box are
+finite in number (their vertex sets are subsets of $[-R,R]^d \cap
+\mathbb{Z}^d$), so finitely many $GL(d,\mathbb{Z})$-classes remain.
+\end{proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:finite}]
+A reflexive polytope has exactly one interior lattice point, so by
+Theorem~\ref{thm:hensley} its volume is at most $c(d,1)$. Apply
+Lemma~\ref{lem:boundedfinite} with $V=c(d,1)$.
+\end{proof}
+
+\begin{remark}[The role of the dual polytope]
+Reflexivity is self-dual: $\Delta$ is reflexive iff $\Delta^*$ is, and
+$(\Delta^*)^* = \Delta$. Finiteness therefore comes in dual pairs, and
+\emph{both} $\Delta$ and $\Delta^*$ are simultaneously controlled by
+Theorem~\ref{thm:hensley}. This is more than cosmetic: the KS strategy
+exploits the fact that bounding one member of the pair bounds the other,
+and that the "large" member ($\Delta^*$ when $\Delta$ is "small") is the one
+with rich lattice-point structure. The volume bound on $\Delta^*$ caps the
+number of lattice points $\Delta^* \cap N$, which (via Batyrev) caps
+$h^{1,1}$ of the associated Calabi--Yau and the number of monomials in the
+anticanonical hypersurface.
+\end{remark}
+
+\begin{remark}[Why finiteness is not enough]
+The bounds $c(d,1)$ are astronomically large, so Theorem~\ref{thm:finite}
+gives no practical algorithm. The counts in~\eqref{eq:counts} were obtained
+not by brute force inside a box, but by the structural reductions
+(S)--(W) below, which is the genuine content of the KS programme.
+\end{remark}
+
+%==============================================================
+\section{Subpolytope structure: maximal reflexive polytopes}\label{sec:sub}
+%==============================================================
+
+\begin{definition}[Subpolytope; maximal reflexive polytope]\label{def:max}
+For reflexive polytopes $P,\Delta$ in the \emph{same} lattice $M$, we say
+$P$ is a \emph{(reflexive) subpolytope} of $\Delta$, written $P \subseteq
+\Delta$, if every vertex of $P$ lies in $\Delta \cap M$ (equivalently
+$P \subseteq \Delta$ as point sets, both having the single interior point
+$0$). A reflexive polytope $\Delta$ is \emph{maximal} if it is not a proper
+reflexive subpolytope of any other reflexive polytope --- i.e.\ one cannot
+enlarge $\Delta$ to a strictly larger reflexive polytope on the same lattice.
+\end{definition}
+
+\begin{theorem}[Every reflexive polytope embeds in a maximal one]\label{thm:embed}
+Every reflexive polytope $P \subset M_{\mathbb{R}}$ is a subpolytope of some
+maximal reflexive polytope $\Delta \subset M_{\mathbb{R}}$.
+\end{theorem}
+
+\begin{proof}[Mechanism]
+Order reflexive polytopes on the lattice $M$ by inclusion. By
+Theorem~\ref{thm:finite} there are only finitely many, so any ascending
+chain $P = P_0 \subsetneq P_1 \subsetneq \cdots$ terminates; a maximal
+element $\Delta$ above $P$ exists. Concretely: while $P$ is not maximal there
+is a lattice point $v$ with $\operatorname{conv}(P \cup \{v\})$ still
+reflexive; adjoin it and repeat. Finiteness guarantees the process halts.
+\end{proof}
+
+\begin{remark}[Why this is the central reduction]
+Theorem~\ref{thm:embed} reduces the whole classification to two tasks:
+(i) enumerate the \emph{maximal} reflexive polytopes; (ii) for each maximal
+$\Delta$, enumerate the reflexive subpolytopes $P \subseteq \Delta$. Step
+(ii) is a finite, downward search inside the lattice points of a single
+$\Delta$: pick subsets of $\Delta \cap M$ whose convex hull is reflexive.
+The payoff is enormous because the maximal polytopes are comparatively
+few. The dual statement is the actual KS workhorse: passing to duals,
+$P \subseteq \Delta$ becomes $\Delta^* \subseteq P^*$, so subpolytopes of a
+maximal $\Delta$ correspond to polytopes \emph{containing} the
+corresponding minimal $\Delta^*$ --- which is how the next section reframes
+everything.
+\end{remark}
+
+%==============================================================
+\section{Duality of maximal and minimal polytopes}\label{sec:dual}
+%==============================================================
+
+Polar duality reverses inclusion:
+\begin{equation}\label{eq:incl-rev}
+  P \subseteq \Delta \quad\Longleftrightarrow\quad \Delta^* \subseteq P^*,
+\end{equation}
+because enlarging a polytope shrinks the set of linear functionals bounded
+below by $-1$ on it. This single fact turns "maximal" into "minimal".
+
+\begin{definition}[Minimal reflexive polytope]\label{def:min}
+A reflexive polytope $\nabla \subset N_{\mathbb{R}}$ is \emph{minimal} if it
+contains no proper reflexive subpolytope, equivalently if removing any
+vertex destroys the interior-point / reflexivity property: $\nabla$ is a
+smallest reflexive polytope still wrapping the origin.
+\end{definition}
+
+\begin{theorem}[Max/min duality]\label{thm:maxmin}
+Polar duality is an inclusion-reversing bijection between reflexive
+polytopes in $M$ and reflexive polytopes in $N$. Under it:
+\begin{equation}
+  \Delta \text{ maximal in } M
+  \quad\Longleftrightarrow\quad
+  \nabla := \Delta^* \text{ minimal in } N.
+\end{equation}
+Consequently, every reflexive polytope $P$ lies in a "family" determined by
+a minimal polytope $\nabla$: namely $P^* \supseteq \nabla = \Delta^*$ where
+$\Delta \supseteq P$ is a maximal hull of $P$ from
+Theorem~\ref{thm:embed}.
+\end{theorem}
+
+\begin{proof}
+Duality is a bijection on reflexive polytopes (involutivity, companion
+notes). By~\eqref{eq:incl-rev} it reverses inclusion, hence sends maximal
+elements to minimal elements and vice versa. The last clause is
+Theorem~\ref{thm:embed} dualized through~\eqref{eq:incl-rev}.
+\end{proof}
+
+\begin{remark}[The strategic inversion]
+Maximal polytopes are hard to find directly (they are "big": many lattice
+points, complicated facets). Minimal polytopes are easy to find directly
+(they are "small": few vertices, tightly constrained by the requirement
+that $0$ be interior). Theorem~\ref{thm:maxmin} says we may enumerate the
+\emph{easy} objects and dualize. This is the conceptual pivot of KS: the
+classification of all reflexive polytopes is bootstrapped from the
+classification of the minimal ones, which --- as the next two sections show
+--- are governed by simple combinatorial-arithmetic data (weight systems).
+\end{remark}
+
+\begin{remark}[Picture in $d=2$]
+The minimal reflexive polygons are the three triangles dual to the maximal
+triangles/quadrilaterals. For instance the minimal $\nabla$ with vertices
+$(1,0),(0,1),(-1,-1)$ (the $\mathbb{P}^2$ fan generators) is dual to the
+maximal reflexive triangle with vertices $(-1,-1),(2,-1),(-1,2)$. All $16$
+reflexive polygons arise as subpolytopes of a handful of maximal ones, dual
+to a handful of minimal triangles/segments-products.
+\end{remark}
+
+%==============================================================
+\section{Decomposition of minimal reflexive polytopes}\label{sec:min}
+%==============================================================
+
+We now describe the minimal polytopes $\nabla \subset N_{\mathbb{R}}$
+concretely. The defining feature is that $0$ is an interior point obtained
+"as economically as possible". This forces a rigid structure.
+
+\begin{definition}[IP (interior point) property]\label{def:ip}
+A finite set of lattice vectors $V = \{v_0,\dots,v_k\} \subset N$ has the
+\emph{IP property} if $0 \in \operatorname{int}\,\operatorname{conv}(V)$,
+i.e.\ the origin is an interior point of their convex hull. A minimal
+reflexive polytope is the convex hull of an IP set that is minimal for
+inclusion (no proper subset is IP).
+\end{definition}
+
+\begin{theorem}[Structure of minimal IP configurations]\label{thm:minstructure}
+Let $\nabla = \operatorname{conv}(V) \subset N_{\mathbb{R}}$ be a minimal
+reflexive polytope, $\dim \nabla = d$. Then the vertex set $V$ decomposes as
+a disjoint union of "simplicial blocks"
+\begin{equation}
+  V = V_1 \sqcup V_2 \sqcup \cdots \sqcup V_r,
+\end{equation}
+where each block $V_j$ is an affinely independent set of $d_j+1$ vectors
+spanning a $d_j$-dimensional sublattice, $\sum_j d_j = d$, and $0$ lies in
+the relative interior of $\operatorname{conv}(V_j)$ within that block's span.
+Equivalently:
+\begin{itemize}
+  \item if $r=1$, $\nabla$ is a \emph{simplex} (the simplicial case): $d+1$
+        vertices in general position with $0$ interior;
+  \item if $r>1$, $\nabla$ is a \emph{convex hull of a collection of
+        lower-dimensional simplices} whose spans are complementary and meet
+        only at $0$ --- a "product of simplices" structure.
+\end{itemize}
+\end{theorem}
+
+\begin{remark}[Why minimality forces this]
+For $0$ to be interior to $\operatorname{conv}(V)$ one needs a positive
+combination $\sum_i \lambda_i v_i = 0$, $\lambda_i>0$, spanning all $d$
+dimensions. Minimality (no proper IP subset) means $V$ admits no
+\emph{smaller} such positive dependence on a subset spanning the same space.
+Carath\'eodory-type reasoning then shows $V$ breaks into independent
+positive circuits: each block $V_j$ is a single minimal positive dependence
+(a simplex with $0$ in its interior), and distinct blocks live in
+complementary subspaces. A single circuit gives a simplex; several stacked
+in complementary directions give the product-of-simplices shape. This is
+exactly the combinatorial heart of Kreuzer--Skarke (1998, 2000): the minimal
+polytopes are classified by how the $d$ dimensions are partitioned into
+simplicial circuits.
+\end{remark}
+
+\begin{example}[Simplex vs.\ product in low dimension]\label{ex:minexamples}
+\leavevmode
+\begin{itemize}
+  \item \emph{Simplicial ($r=1$, $d=2$):} $V=\{(1,0),(0,1),(-1,-1)\}$,
+        the $\mathbb{P}^2$ triangle. One circuit
+        $1\cdot(1,0)+1\cdot(0,1)+1\cdot(-1,-1)=0$.
+  \item \emph{Product ($r=2$, $d=2$):} $V=\{(\pm1,0),(0,\pm1)\}$, the
+        "cross" of $\mathbb{P}^1\times\mathbb{P}^1$. Two
+        one-dimensional circuits $(1,0)+(-1,0)=0$ and $(0,1)+(0,-1)=0$ in
+        complementary lines; $\nabla$ is the square (a product of two
+        $1$-simplices).
+\end{itemize}
+Dually, these are the minimal polytopes whose maximal duals seed the
+$\mathbb{P}^2$ and $\mathbb{P}^1\times\mathbb{P}^1$ families of reflexive
+polygons.
+\end{example}
+
+%==============================================================
+\section{Weight systems}\label{sec:weights}
+%==============================================================
+
+The final layer makes Section~\ref{sec:min} arithmetic and therefore
+enumerable. Each simplicial block is encoded by a \emph{weight system}.
+
+\subsection{Single weight systems and the simplicial case}
+
+\begin{definition}[Weight system]\label{def:weights}
+A \emph{weight system} of length $d+1$ is a tuple of positive numbers
+\begin{equation}
+  q = (q_0, q_1, \dots, q_d), \qquad q_i \in \mathbb{Q}_{>0},
+\end{equation}
+normalized by $\sum_{i=0}^{d} q_i = 1$. Equivalently one uses coprime
+positive \emph{integers} $(w_0,\dots,w_d)$ with $q_i = w_i / \sum_j w_j$;
+the common denominator $\sum_j w_j$ is the \emph{degree} $d_{\mathrm{w}}$.
+\end{definition}
+
+A weight system specifies a circuit: a simplex with vertices
+$v_0,\dots,v_d$ obeying the single linear relation
+\begin{equation}\label{eq:circuit}
+  \sum_{i=0}^{d} w_i\, v_i = 0,
+\end{equation}
+which is exactly the condition that $0 \in N_{\mathbb{R}}$ lie in the
+relative interior with barycentric-type coordinates proportional to the
+weights. Geometrically $q$ defines the weighted projective space
+$\mathbb{P}^d_{(w_0,\dots,w_d)}$, whose fan generators are the $v_i$.
+
+\begin{definition}[IP property for weight systems]\label{def:ipweights}
+A weight system $q=(q_0,\dots,q_d)$ has the \emph{interior-point (IP)
+property} if the simplex it defines has $0$ in its interior, i.e.\ all
+weights are strictly positive and~\eqref{eq:circuit} has a solution spanning
+all $d$ dimensions. The associated weighted projective space then has $0$
+as the unique interior point of the spanning simplex.
+\end{definition}
+
+\begin{theorem}[Reflexivity test for weighted simplices]\label{thm:reflexweight}
+The simplex defined by an IP weight system $q$ gives a \emph{reflexive}
+simplex iff the associated weighted projective space is Gorenstein, which
+for $q$ amounts to the divisibility condition
+\begin{equation}
+  d_{\mathrm{w}} = \sum_{i} w_i \ \equiv\ 0 \pmod{w_i}
+  \quad\text{for every } i,
+\end{equation}
+equivalently each $w_i \mid d_{\mathrm{w}}$. (More general reflexive
+simplices arise after this is relaxed to the full reflexivity check on the
+resulting lattice polytope.)
+\end{theorem}
+
+\begin{remark}[How KS use this]
+Kreuzer--Skarke enumerate weight systems with the IP property up to the
+volume/degree bound implied by finiteness (Section~\ref{sec:finite}), then
+test reflexivity. The number of IP weight systems is itself finite and was
+tabulated: in the four-dimensional polytope problem one enumerates IP
+weight systems of length $5$ (giving the simplicial minimal $4$-polytopes)
+and their combinations. Each surviving weight system yields a minimal
+reflexive simplex; dualizing (Section~\ref{sec:dual}) yields a maximal
+reflexive polytope; enumerating reflexive subpolytopes (Section~\ref{sec:sub})
+yields the full list. The largest reflexive simplices --- the ones with the
+volume-maximizing Sylvester-sequence weights --- are exactly the extreme
+cases that saturate Hensley's bound (Theorem~\ref{thm:hensley}).
+\end{remark}
+
+\subsection{Combined weight systems and the product case}
+
+When the minimal polytope is a product of simplices ($r>1$ in
+Theorem~\ref{thm:minstructure}), one weight system is insufficient: each
+simplicial block $V_j$ of dimension $d_j$ carries its own weight system
+$q^{(j)}=(q^{(j)}_0,\dots,q^{(j)}_{d_j})$.
+
+\begin{definition}[Combined weight system]\label{def:combined}
+A \emph{combined weight system} (CWS) in dimension $d$ is a finite
+collection
+\begin{equation}
+  \bigl(q^{(1)}, q^{(2)}, \dots, q^{(r)}\bigr),
+  \qquad q^{(j)} \text{ a weight system on a } d_j\text{-block},
+  \qquad \sum_{j=1}^{r} d_j = d,
+\end{equation}
+each $q^{(j)}$ individually IP, whose blocks are assigned complementary
+coordinate subspaces. The associated polytope is
+$\nabla = \operatorname{conv}\bigl(\bigsqcup_j V_j\bigr)$, a product of the
+weighted simplices --- with $0$ interior because it is interior to each
+block.
+\end{definition}
+
+\begin{remark}[The lower-dimensional building-block principle]
+Because $\sum_j d_j = d$ with each $d_j < d$ (when $r>1$), the
+product-of-simplices minimal polytopes in dimension $d$ are assembled from
+weight systems living in \emph{strictly lower} dimensions. This is the sense
+in which the classification is recursive: the $d$-dimensional minimal
+polytopes are built from single weight systems (the $r=1$ simplices) plus
+combinations of lower-dimensional ones (the $r>1$ products). KS organize the
+enumeration by first listing all IP weight systems up to length $d+1$, then
+forming all dimension-$d$ combined weight systems, then dualizing and
+expanding to subpolytopes.
+\end{remark}
+
+\subsection{The full Kreuzer--Skarke pipeline}
+
+Assembling Sections~\ref{sec:finite}--\ref{sec:weights}, the KS algorithm is:
+
+\begin{enumerate}
+  \item \textbf{Enumerate (combined) weight systems with the IP property}
+        in dimension $d$, bounded using finiteness
+        (Section~\ref{sec:weights}, Theorem~\ref{thm:hensley}).
+  \item \textbf{Build minimal reflexive polytopes} $\nabla$ from the IP
+        weight systems / CWS (Section~\ref{sec:min}).
+  \item \textbf{Dualize} $\nabla \mapsto \Delta=\nabla^*$ to obtain the
+        \emph{maximal} reflexive polytopes (Section~\ref{sec:dual}).
+  \item \textbf{Enumerate reflexive subpolytopes} $P \subseteq \Delta$ for
+        each maximal $\Delta$ (Section~\ref{sec:sub}).
+  \item \textbf{Normal-form and deduplicate}: compute a $GL(d,\mathbb{Z})$
+        normal form (PALP) for every $P$ and remove duplicates produced by
+        overlapping families.
+\end{enumerate}
+
+\begin{theorem}[Kreuzer--Skarke enumeration]\label{thm:ks}
+The above procedure terminates and produces the complete list of reflexive
+polytopes up to $GL(d,\mathbb{Z})$, with counts
+$16$ ($d=2$), $4319$ ($d=3$), and $473\,800\,776$ ($d=4$).
+\end{theorem}
+
+\begin{remark}[Connection to \texttt{refpoly-5d}]
+The \texttt{refpoly-5d} project executes steps (1) and (5) of this pipeline
+for $d=5$: it ingests the Skarke--Scholler dataset of weight systems
+($\sim$$185$ billion), computes PALP $GL(5,\mathbb{Z})$ normal forms, and
+deduplicates at scale ($3.2$ TB) via external sort-merge. The geometric
+payoff is the dictionary of the companion notes: a reflexive $5$-polytope
+$\Delta$ is the seed of a Gorenstein Fano toric $5$-fold $\mathbb{P}_\Delta$
+whose generic anticanonical hypersurface is a Calabi--Yau \emph{fourfold} ---
+the geometry of F-theory compactification. Dimension $5$ is the first case
+not covered by Theorem~\ref{thm:ks}, hence frontier work.
+\end{remark}
+
+%==============================================================
+\section{Key references}
+%==============================================================
+\begin{itemize}
+  \item \textbf{Kreuzer--Skarke (2000)}, ``Complete classification of
+        reflexive polyhedra in four dimensions,'' \emph{Adv.\ Theor.\ Math.\
+        Phys.}\ \textbf{4}, 1209--1230 (arXiv:hep-th/0002240): the
+        $473\,800\,776$ enumeration and the max/min, subpolytope, and
+        weight-system machinery (Sections~\ref{sec:sub}--\ref{sec:weights}).
+  \item \textbf{Kreuzer--Skarke (1998)}, ``Classification of reflexive
+        polyhedra in three dimensions,'' \emph{Adv.\ Theor.\ Math.\ Phys.}\
+        \textbf{2}, 853--871 (arXiv:hep-th/9805190): the $4319$ enumeration
+        and the weight-system / IP method in $d=3$.
+  \item \textbf{Kreuzer--Skarke (2004)}, ``PALP: A Package for Analysing
+        Lattice Polytopes \dots,'' \emph{Comput.\ Phys.\ Commun.}\
+        \textbf{157}, 87--106 (arXiv:math/0204356): the software computing
+        $GL(d,\mathbb{Z})$ normal forms used in step (5) and in
+        \texttt{refpoly-5d}.
+  \item \textbf{Batyrev (1994)}, ``Dual polyhedra and mirror symmetry
+        \dots,'' \emph{J.\ Algebraic Geom.}\ \textbf{3}, 493--535
+        (arXiv:alg-geom/9310003): reflexive polytopes, polar duality, and
+        the Gorenstein-Fano / Calabi--Yau dictionary (used throughout).
+  \item \textbf{Hensley (1983)}, ``Lattice vertex polytopes with interior
+        lattice points,'' \emph{Pacific J.\ Math.}\ \textbf{105}, 183--191:
+        the volume bound, Theorem~\ref{thm:hensley}.
+  \item \textbf{Lagarias--Ziegler (1991)}, ``Bounds for lattice polytopes
+        containing a fixed number of interior points in a sublattice,''
+        \emph{Canad.\ J.\ Math.}\ \textbf{43}, 1022--1035: finiteness up to
+        $GL(d,\mathbb{Z})$, Theorem~\ref{thm:finite}.
+\end{itemize}
+
+\end{document}

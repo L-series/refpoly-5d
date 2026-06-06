@@ -9,6 +9,18 @@ The running LaTeX lecture notes live at `latex/notes/theory_notes.tex` (amsart
 class, standard theorem environments). Created 2026-06-06. (User explicitly chose
 `latex/notes/` over `docs/` for the file location.)
 
+There is also a SECOND standalone document `latex/notes/ks_classification.tex`
+(created 2026-06-06, same amsart preamble/theorem envs), a self-contained
+chapter on the Kreuzer--Skarke classification programme: finiteness
+(Hensley/Lagarias--Ziegler), subpolytope->maximal reduction, max/min polar
+duality, decomposition of minimal polytopes into simplices/products (IP
+property, circuits), and weight systems + combined weight systems, ending with
+the full KS pipeline and a refpoly-5d tie-in. References include the two KS
+papers (1998 hep-th/9805190, 2000 hep-th/0002240), PALP (math/0204356), Batyrev,
+Hensley, Lagarias--Ziegler. Compiles clean with pdflatex (run twice; 8 pages).
+README build section lists both .tex files. Each document is its OWN standalone
+file (own \documentclass + \maketitle); there is no master/include file.
+
 Section status:
 - **Foundations of Toric Geometry** — PLACEHOLDER only (lattices/fans intro + a
   remark noting it is to be filled in). Cones, Cox ring, divisors, intersection

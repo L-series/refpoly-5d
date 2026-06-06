@@ -25,17 +25,33 @@ refpoly-5d/
 ├── README.md
 ```
 
+## Getting Started
+
+This repository uses [PALP](https://github.com/L-series/PALP) as a git submodule. After cloning, initialize and update the submodule before running the pipeline:
+
+```bash
+git submodule update --init --recursive
+```
+
+If you cloned with `--recurse-submodules`, this step is already done.
+
 ## Requirements
 
 | Component | Tool | Purpose |
 |-----------|------|---------|
-| LaTeX notes *(optional)* | `pdflatex` (TeX Live) | Compiles `latex/notes/theory_notes.tex` into a PDF summarising the mathematical background. Install via [TeX Live](https://tug.org/texlive/). |
+| LaTeX notes *(optional)* | `pdflatex` (TeX Live) | Compiles the LaTeX notes in `latex/notes/` into PDFs summarising the mathematical background. Install via [TeX Live](https://tug.org/texlive/). |
 
-To build the PDF:
+The `latex/notes/` directory contains two standalone documents:
+
+- `theory_notes.tex` — toric geometry, Calabi–Yau manifolds, reflexive polyhedra, and Batyrev's construction.
+- `ks_classification.tex` — the Kreuzer–Skarke classification programme (finiteness, maximal/minimal duality, subpolytope structure, weight systems) underpinning the `refpoly-5d` pipeline.
+
+To build the PDFs:
 
 ```bash
 cd latex/notes
 pdflatex theory_notes.tex
+pdflatex ks_classification.tex   # run twice for cross-references and table of contents
 ```
 
 ## Citation
