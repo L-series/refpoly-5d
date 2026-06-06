@@ -25,6 +25,19 @@ refpoly-5d/
 ├── README.md
 ```
 
+## Requirements
+
+| Component | Tool | Purpose |
+|-----------|------|---------|
+| LaTeX notes *(optional)* | `pdflatex` (TeX Live) | Compiles `latex/notes/theory_notes.tex` into a PDF summarising the mathematical background. Install via [TeX Live](https://tug.org/texlive/). |
+
+To build the PDF:
+
+```bash
+cd latex/notes
+pdflatex theory_notes.tex
+```
+
 ## Citation
 
 If you use this code or data, please cite the accompanying paper (reference to be added upon publication).

@@ -1,0 +1,280 @@
+\documentclass{amsart}
+\usepackage{amsmath, amssymb, amsthm, hyperref, tikz}
+
+\title{Toric Geometry and Calabi--Yau Manifolds: Lecture Notes}
+\author{Personalized Notes (companion to \texttt{refpoly-5d})}
+\date{\today}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+\newtheorem{remark}[theorem]{Remark}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+%==============================================================
+\section{Foundations of Toric Geometry}
+%==============================================================
+We fix throughout a rank-$n$ lattice $N \cong \mathbb{Z}^n$ with dual lattice
+$M = \operatorname{Hom}(N,\mathbb{Z})$, and their real scalar extensions
+$N_{\mathbb{R}} = N \otimes \mathbb{R}$, $M_{\mathbb{R}} = M \otimes \mathbb{R}$.
+The natural pairing is denoted $\langle\,\cdot\,,\,\cdot\,\rangle : M_{\mathbb{R}} \times N_{\mathbb{R}} \to \mathbb{R}$.
+
+A \emph{fan} $\Sigma$ in $N_{\mathbb{R}}$ is a collection of strongly convex
+rational polyhedral cones, closed under taking faces and intersections.
+To each fan one associates a normal toric variety $\mathbb{P}_\Sigma$
+(equivalently $X_\Sigma$). The construction translates combinatorial
+data of $\Sigma$ into algebro-geometric data of $X_\Sigma$:
+cones $\leftrightarrow$ affine charts, rays $\leftrightarrow$ torus-invariant
+divisors, smoothness $\leftrightarrow$ each cone spanned by part of a
+lattice basis, compactness $\leftrightarrow$ the support of $\Sigma$ being
+all of $N_{\mathbb{R}}$.
+
+\begin{remark}
+This section is a placeholder to be filled in as the foundational
+toric material (cones, fans, divisors, the Cox ring, intersection theory)
+is discussed. The notes below currently focus on Calabi--Yau manifolds,
+reflexive polytopes, and Batyrev's construction.
+\end{remark}
+
+%==============================================================
+\section{Calabi--Yau Manifolds}
+%==============================================================
+
+\subsection{Definition and equivalences}
+
+\begin{definition}[Calabi--Yau manifold]\label{def:cy}
+A \emph{Calabi--Yau manifold} of complex dimension $n$ is a compact
+K\"ahler manifold $X$ satisfying any one of the following equivalent
+conditions:
+\begin{enumerate}
+  \item the canonical bundle is trivial,
+        $K_X := \bigwedge^n \Omega_X^1 \cong \mathcal{O}_X$
+        (equivalently $c_1(X) = 0$);
+  \item the holonomy group of $X$ is contained in $SU(n)$;
+  \item there exists a nowhere-vanishing holomorphic $n$-form
+        $\Omega \in H^0(X,\Omega_X^n)$, unique up to scale;
+  \item each K\"ahler class contains a Ricci-flat K\"ahler metric.
+\end{enumerate}
+\end{definition}
+
+\begin{theorem}[Yau, 1978; Calabi conjecture]\label{thm:yau}
+On a compact K\"ahler manifold with $c_1(X)=0$, every K\"ahler class
+contains a \emph{unique} Ricci-flat K\"ahler metric.
+\end{theorem}
+
+\begin{remark}
+Theorem~\ref{thm:yau} is the bridge between the algebraic condition
+$K_X \cong \mathcal{O}_X$ (Definition~\ref{def:cy}(1), checkable by pure
+algebra) and the differential-geometric condition (Definition~\ref{def:cy}(4)).
+For no compact Calabi--Yau of dimension $\geq 2$ is the Ricci-flat metric
+known explicitly; constructing it numerically is an active area.
+\end{remark}
+
+\begin{remark}[A definitional subtlety]
+Some authors strengthen Definition~\ref{def:cy} by also requiring
+$h^{i,0}(X)=0$ for $0<i<n$, which excludes complex tori and products and
+forces holonomy to be \emph{exactly} $SU(n)$. This matters when counting
+moduli but rarely affects the toric hypersurface constructions below.
+\end{remark}
+
+\subsection{Hodge numbers and moduli}
+
+The topology of $X$ is organized by the Hodge numbers
+$h^{p,q} = \dim_{\mathbb{C}} H^q(X,\Omega_X^p)$. For a Calabi--Yau
+threefold satisfying the strict definition, the Hodge diamond has only two
+independent entries, $h^{1,1}$ and $h^{2,1}$, with Euler characteristic
+\begin{equation}
+  \chi(X) = 2\bigl(h^{1,1} - h^{2,1}\bigr).
+\end{equation}
+Geometrically and physically:
+\begin{itemize}
+  \item $h^{1,1}$ counts \emph{K\"ahler (size) moduli} --- deformations of
+        the K\"ahler class;
+  \item $h^{2,1}$ counts \emph{complex-structure (shape) moduli} ---
+        deformations of the complex structure.
+\end{itemize}
+
+%==============================================================
+\section{Why Calabi--Yau Manifolds Matter}
+%==============================================================
+
+\subsection{Mathematical significance}
+Calabi--Yau manifolds are the $\kappa = 0$, $K_X \cong \mathcal{O}_X$
+fixed point of the canonical class, sitting between Fano varieties
+($-K_X$ ample, ``positively curved'') and varieties of general type
+($K_X$ ample) in the Kodaira/minimal-model trichotomy. Yau's theorem
+(Theorem~\ref{thm:yau}) makes them central to geometric analysis, and
+mirror symmetry (Section~\ref{sec:mirror}) makes them a font of
+enumerative-geometry predictions.
+
+\subsection{Physical significance}
+In superstring theory spacetime is $10$-dimensional; compactification
+writes it as $\mathbb{R}^{1,3} \times X$ with $X$ compact and small.
+Preserving $\mathcal{N}=1$ supersymmetry in the $4$d effective theory
+forces $X$ to have $SU(3)$ holonomy, i.e.\ $X$ is a Calabi--Yau
+\emph{threefold} (Candelas--Horowitz--Strominger--Witten, 1985). The
+dictionary reads $h^{2,1}, h^{1,1} \leftrightarrow$ massless scalar moduli
+fields, and the number of chiral generations is governed by
+$\tfrac{1}{2}|\chi(X)|$ in simple heterotic models.
+
+\begin{remark}[Relevance to this repository]\label{rmk:repo}
+F-theory compactifications use Calabi--Yau \emph{fourfolds}, which arise
+as anticanonical hypersurfaces in $5$-dimensional toric varieties. A
+classification of $5$-dimensional reflexive polytopes (the goal of the
+\texttt{refpoly-5d} project) is therefore a classification of candidate
+ambient spaces for such F-theory geometries.
+\end{remark}
+
+%==============================================================
+\section{Reflexive Polyhedra}
+%==============================================================
+
+\begin{definition}[Reflexive polytope; Batyrev 1994]\label{def:reflexive}
+A full-dimensional lattice polytope $\Delta \subset M_{\mathbb{R}}$
+containing the origin in its interior is \emph{reflexive} if its
+\emph{polar dual}
+\begin{equation}
+  \Delta^* \;:=\; \bigl\{\, v \in N_{\mathbb{R}} \;:\;
+  \langle u,v\rangle \geq -1 \ \ \forall\, u \in \Delta \,\bigr\}
+\end{equation}
+is again a lattice polytope (all of its vertices lie in $N$).
+\end{definition}
+
+\begin{proposition}[Properties of reflexive polytopes]\label{prop:reflexive}
+\leavevmode
+\begin{enumerate}
+  \item Polar duality is an involution: $(\Delta^*)^* = \Delta$. Hence
+        reflexive polytopes occur in \emph{dual pairs} $(\Delta,\Delta^*)$,
+        with the roles of $M$ and $N$ exchanged.
+  \item A reflexive polytope has \emph{exactly one} interior lattice point,
+        namely the origin. (This is the practical test for reflexivity.)
+  \item In each dimension there are finitely many reflexive polytopes up to
+        $GL(n,\mathbb{Z})$ (Lagarias--Ziegler finiteness).
+\end{enumerate}
+\end{proposition}
+
+\begin{remark}[Kreuzer--Skarke enumeration]
+The classification is complete through dimension $4$:
+$1$ in dimension $0$, $16$ reflexive polygons in dimension $2$,
+$4319$ in dimension $3$, and $473\,800\,776$ in dimension $4$
+(Kreuzer--Skarke). Dimension $5$ is \emph{not} fully classified --- the
+frontier addressed by the \texttt{refpoly-5d} project (cf.\
+Remark~\ref{rmk:repo}).
+\end{remark}
+
+\begin{example}[The reflexive simplex of $\mathbb{P}^2$]\label{ex:p2}
+The simplex $\Delta \subset M_{\mathbb{R}} = \mathbb{R}^2$ with vertices
+$(-1,-1),\ (2,-1),\ (-1,2)$ is reflexive; its only interior lattice point
+is the origin. Its polar dual $\Delta^*$ has vertices
+$(1,0),\ (0,1),\ (-1,-1)$ and is also reflexive. The associated toric
+variety is $\mathbb{P}^2$.
+\end{example}
+
+%==============================================================
+\section{Batyrev's Construction and Mirror Symmetry}\label{sec:mirror}
+%==============================================================
+
+\subsection{From a reflexive polytope to a Gorenstein Fano toric variety}
+
+Given a reflexive $\Delta \subset M_{\mathbb{R}}$, the face fan
+(normal fan) of $\Delta^*$ defines a toric variety $\mathbb{P}_\Delta$.
+
+\begin{theorem}[Reflexivity $\Leftrightarrow$ Gorenstein Fano]\label{thm:fano}
+$\Delta$ is reflexive if and only if $\mathbb{P}_\Delta$ is a Gorenstein
+Fano toric variety, i.e.\ the anticanonical class $-K_{\mathbb{P}_\Delta}$
+is an ample Cartier divisor. The lattice points $\Delta \cap M$ index a
+basis of monomial sections of $-K_{\mathbb{P}_\Delta}$.
+\end{theorem}
+
+\subsection{The Calabi--Yau hypersurface}
+
+\begin{theorem}[Batyrev, 1994]\label{thm:batyrev}
+Let $\Delta \subset M_{\mathbb{R}}$ be reflexive of dimension $n$. A generic
+member of the anticanonical linear system,
+\begin{equation}
+  X \;=\; \Bigl\{\, \textstyle\sum_{m \in \Delta \cap M} a_m\, x^{m} = 0 \,\Bigr\}
+  \;\subset\; \mathbb{P}_\Delta,
+\end{equation}
+admits a crepant toric resolution that is a Calabi--Yau variety of
+dimension $n-1$.
+\end{theorem}
+
+\begin{proof}[Mechanism (adjunction)]
+For $X \in |-K_{\mathbb{P}_\Delta}|$ the adjunction formula gives
+\begin{equation}
+  K_X = \bigl(K_{\mathbb{P}_\Delta} + X\bigr)\big|_X
+      = \bigl(K_{\mathbb{P}_\Delta} - K_{\mathbb{P}_\Delta}\bigr)\big|_X
+      = \mathcal{O}_X,
+\end{equation}
+so the canonical bundle is trivial by construction. Reflexivity
+(Theorem~\ref{thm:fano}) ensures $-K_{\mathbb{P}_\Delta}$ is Cartier and
+base-point-free, and a sufficiently fine fan subdivision yields a crepant
+(Calabi--Yau-preserving) resolution of the residual orbifold
+singularities.
+\end{proof}
+
+\begin{example}[The quintic threefold]\label{ex:quintic}
+Taking $n=4$ and $\Delta$ the reflexive simplex with
+$\mathbb{P}_\Delta = \mathbb{P}^4$, one has
+$-K_{\mathbb{P}^4} = \mathcal{O}(5)$, so $X$ is a generic quintic
+hypersurface in $\mathbb{P}^4$: a Calabi--Yau threefold with
+$h^{1,1}=1$, $h^{2,1}=101$, $\chi = -200$.
+\end{example}
+
+\subsection{Mirror symmetry via polar duality}
+
+The reflexive pair $(\Delta,\Delta^*)$ yields a \emph{mirror pair} of
+Calabi--Yau varieties $(X, X^*)$: applying Theorem~\ref{thm:batyrev} to
+$\Delta^*$ gives $X^*$. For the threefold case ($n=4$), Batyrev's
+combinatorial Hodge-number formulas read
+\begin{align}
+  h^{1,1}(X) &= \ell(\Delta^*) - (n+1)
+     - \sum_{\substack{\text{facets }\Theta^* \prec \Delta^*}} \ell^*(\Theta^*)
+     + \sum_{\substack{\text{codim-}2\ \Theta^* \prec \Delta^*}}
+        \ell^*(\Theta^*)\,\ell^*(\widehat{\Theta}),
+\end{align}
+where $\ell(\cdot)$ counts lattice points, $\ell^*(\cdot)$ counts
+relative-interior lattice points, and $\widehat{\Theta}$ is the dual face;
+the formula for $h^{2,1}(X)$ is the same expression with $\Delta$ and
+$\Delta^*$ interchanged. The manifest $\Delta \leftrightarrow \Delta^*$
+symmetry yields
+\begin{equation}
+  h^{1,1}(X) = h^{2,1}(X^*), \qquad h^{2,1}(X) = h^{1,1}(X^*),
+\end{equation}
+the topological signature of mirror symmetry (a reflection of the Hodge
+diamond across its diagonal).
+
+\begin{remark}
+Batyrev's construction was the first systematic, large-scale source of
+mirror pairs, and it is why the Kreuzer--Skarke database is the canonical
+arena for studying mirror symmetry. The deeper physical statement --- that
+the quantum-corrected K\"ahler moduli space of $X$ equals the
+complex-structure moduli space of $X^*$, with Gromov--Witten invariants of
+$X$ extracted from period integrals on $X^*$ --- was verified explicitly
+for the quintic by Candelas--de la Ossa--Green--Parkes.
+\end{remark}
+
+%==============================================================
+\section{Key Results from the Literature}
+%==============================================================
+\begin{itemize}
+  \item \textbf{Batyrev (1994)}, ``Dual polyhedra and mirror symmetry for
+        Calabi--Yau hypersurfaces in toric varieties,'' \emph{J.\ Algebraic
+        Geom.}\ \textbf{3}, 493--535 (arXiv:alg-geom/9310003): reflexive
+        polytopes, Theorems~\ref{thm:fano}, \ref{thm:batyrev}, and the
+        mirror construction.
+  \item \textbf{Yau (1978)}: existence and uniqueness of Ricci-flat K\"ahler
+        metrics (Theorem~\ref{thm:yau}).
+  \item \textbf{Candelas--de la Ossa--Green--Parkes (1991)}: explicit mirror
+        symmetry and Gromov--Witten predictions for the quintic.
+  \item \textbf{Kreuzer--Skarke}: complete enumeration of reflexive
+        polytopes through dimension $4$.
+\end{itemize}
+
+\end{document}
