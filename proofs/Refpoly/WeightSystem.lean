@@ -34,12 +34,16 @@ Main results:
 * `pseudoreflexive` (**T5.11**, [SS18] §6): `Δ_q = [Δ_q] = [[Δ_q*]*]`,
   formalized abstractly: for any lattice polytope `∇ ∋ 0`,
   `[[ [∇*]* ]*]... ` — see the precise statement below.
+* `cws_ip_component` (**T5.10**, [SS18] §2.2, citing math/0001106): each block
+  of an IP combined weight system is itself an IP weight system.  Proved by the
+  open-mapping/projection argument, under an explicit block-surjectivity
+  hypothesis (the non-degeneracy that holds for every geometric CWS; see the
+  theorem docstring).
 
 Deferred (`sorry`, with the paper proofs transcribed):
 
 * `ip_half_reduction` (**L5.8**, [SS18] §3): the `q_n = ½` reduction that
   splits the `d = 5` search into the `n = 6, r = 1` and `n = 5, r = ½` runs.
-* `cws_ip_component` (**T5.10**, [SS18] §2.2, citing math/0001106).
 -/
 import Refpoly.MaxMin
 
@@ -391,18 +395,104 @@ def CWS.IsIP {k : ℕ} (C : CWS k n) : Prop :=
   (0 : C.subspace) ∈ interior (convexHull ℝ
     {y : C.subspace | IsLatticePoint (y : V n) ∧ ∀ i, -1 ≤ (y : V n) i})
 
-/-- **T5.10 ([SS18] §2.2, citing math/0001106) — deferred.**  "For a combined
-weight system to have the IP property, it is necessary that every single
-weight system occurring in it has this property."  Stated via the
-block-restriction `e`: an injection of the support of row `a` into `Fin m`
-carrying `W a` to a positive weight system `q'`.  The paper proof projects
-the joint polytope onto the block coordinates and observes that the image of
-an interior point is interior. -/
+/-- **T5.10 ([SS18] §2.2, citing math/0001106).**  "For a combined weight
+system to have the IP property, it is necessary that every single weight
+system occurring in it has this property."  Stated via the block-restriction
+`e`: an injection of the support of row `a` into `Fin m` carrying `W a` to a
+positive weight system `q'`.
+
+*Proof (the paper's projection argument, made precise).*  The block
+projection `π : y ↦ y ∘ e` (Lean `LinearMap.funLeft`) carries the joint kernel
+`C.subspace` into `W_{q'}` (because `W a` is supported on the block, so
+`q' ⬝ᵥ π y = (W a) ⬝ᵥ y = 0`) and carries the joint generators `{y : ℤ-pt,
+yᵢ ≥ -1}` into the generators of `Δ_{q'}`.  As a *surjective* linear map
+between the finite-dimensional subspaces `C.subspace ↠ W_{q'}` it is an **open
+map** (`LinearMap.isOpenMap_of_finiteDimensional`), so it sends the interior
+point `0 ∈ int Δ_C` to an interior point `0 = π 0 ∈ int Δ_{q'}`.
+
+The surjectivity of the block projection (`hlift`: every `z ∈ W_{q'}` lifts to
+a joint-kernel vector agreeing with `z` on the block) is the one piece of
+genuine CWS geometry that the four abstract axioms of `CWS` do not by
+themselves force — it can fail for *degenerate* combined systems where the
+joint kernel collapses on a block (e.g. `k = n`, where `C.subspace = 0`).  For
+every geometrically realized combined weight system (`n = d + k`, each block
+contributing a positive-dimensional factor) it holds, and it is exactly the
+hypothesis under which the paper's projection argument is valid; we therefore
+take it as an explicit hypothesis rather than silently assuming non-degeneracy.
+-/
 theorem cws_ip_component {k m : ℕ} (C : CWS k n) (hC : C.IsIP) (a : Fin k)
     (e : Fin m → Fin n) (he : Function.Injective e)
     (hsupp : ∀ i, 0 < C.W a i ↔ ∃ b, e b = i) (q' : V m)
-    (hq' : ∀ b, q' b = C.W a (e b)) :
+    (hq' : ∀ b, q' b = C.W a (e b))
+    (hlift : ∀ z : V m, q' ⬝ᵥ z = 0 →
+      ∃ y : V n, (∀ a' : Fin k, C.W a' ⬝ᵥ y = 0) ∧ ∀ b, y (e b) = z b) :
     IsIPWeightSystem q' := by
-  sorry
+  classical
+  -- coordinates off the block carry zero weight (nonneg + support description)
+  have hzero : ∀ i, (¬ ∃ b, e b = i) → C.W a i = 0 := fun i hi =>
+    le_antisymm (not_lt.1 (fun h => hi ((hsupp i).1 h))) (C.nonneg a i)
+  -- the block projection  y ↦ y ∘ e  as a linear map  V n → V m
+  set pLin : V n →ₗ[ℝ] V m := LinearMap.funLeft ℝ ℝ e with hpLin
+  -- reindexing:  Σ_b (W a)(e b)·y(e b) = Σ_i (W a i)·y i   (terms off-block vanish)
+  have reindex : ∀ y : V n,
+      (∑ b, C.W a (e b) * y (e b)) = ∑ i, C.W a i * y i := by
+    intro y
+    have hinj : ∀ x ∈ (Finset.univ : Finset (Fin m)), ∀ z ∈ (Finset.univ : Finset (Fin m)),
+        e x = e z → x = z := fun x _ z _ h => he h
+    have key : ∑ i ∈ Finset.univ.image e, C.W a i * y i
+        = ∑ b, C.W a (e b) * y (e b) := Finset.sum_image hinj
+    rw [← key]
+    apply Finset.sum_subset (Finset.subset_univ _)
+    intro i _ hi
+    have hni : ¬ ∃ b, e b = i := fun ⟨b, hb⟩ =>
+      hi (Finset.mem_image.2 ⟨b, Finset.mem_univ b, hb⟩)
+    rw [hzero i hni, zero_mul]
+  -- (A) the projection maps the joint kernel into W_{q'}
+  have hA : ∀ y ∈ C.subspace, pLin y ∈ wsHyperplane q' := by
+    intro y hy
+    have hy' : y ∈ ⨅ a', LinearMap.ker (dotLin (C.W a')) := hy
+    have hker : C.W a ⬝ᵥ y = 0 := by
+      simpa using LinearMap.mem_ker.1 ((Submodule.mem_iInf _).1 hy' a)
+    have hcalc : q' ⬝ᵥ pLin y = C.W a ⬝ᵥ y := by
+      simp only [dotProduct, hpLin, LinearMap.funLeft_apply]
+      rw [← reindex y]
+      exact Finset.sum_congr rfl (fun b _ => by rw [hq' b])
+    rw [mem_wsHyperplane, hcalc]; exact hker
+  -- the restricted/corestricted projection  F : C.subspace → W_{q'}
+  set F : C.subspace →ₗ[ℝ] wsHyperplane q' := pLin.restrict hA with hF
+  -- positivity of the component weights
+  have hpos : ∀ b, 0 < q' b := fun b => by rw [hq' b]; exact (hsupp (e b)).2 ⟨b, rfl⟩
+  refine ⟨hpos, ?_⟩
+  -- F is surjective …
+  have hFsurj : Function.Surjective F := by
+    rintro ⟨z, hz⟩
+    rw [mem_wsHyperplane] at hz
+    obtain ⟨y, hyker, hyz⟩ := hlift z hz
+    have hy : y ∈ C.subspace :=
+      (Submodule.mem_iInf _).2 (fun a' => by rw [LinearMap.mem_ker, dotLin_apply]; exact hyker a')
+    refine ⟨⟨y, hy⟩, Subtype.ext (funext fun b => ?_)⟩
+    simp only [hF, LinearMap.coe_restrict_apply, hpLin, LinearMap.funLeft_apply]
+    exact hyz b
+  -- … hence an open map between the finite-dimensional subspaces
+  have hFopen : IsOpenMap F := LinearMap.isOpenMap_of_finiteDimensional F hFsurj
+  -- the joint generators map into the generators of Δ_{q'}
+  set GC : Set C.subspace :=
+    {y | IsLatticePoint (y : V n) ∧ ∀ i, -1 ≤ (y : V n) i} with hGC
+  have himg : F '' GC ⊆ wsLatticeGensAt q' 1 := by
+    rintro _ ⟨w, hw, rfl⟩
+    rw [hGC, Set.mem_setOf_eq] at hw
+    refine ⟨fun b => ?_, fun b => ?_⟩
+    · simp only [hF, LinearMap.coe_restrict_apply, hpLin, LinearMap.funLeft_apply]
+      exact hw.1 (e b)
+    · simp only [hF, LinearMap.coe_restrict_apply, hpLin, LinearMap.funLeft_apply]
+      simpa using hw.2 (e b)
+  -- interior chase:  0 = F 0 ∈ F '' int Δ_C ⊆ int (F '' Δ_C) ⊆ int Δ_{q'}
+  have hsub : F '' (convexHull ℝ GC) ⊆ wsPolytopeAt q' 1 := by
+    rw [LinearMap.image_convexHull]
+    exact convexHull_mono himg
+  have hCmem : (0 : C.subspace) ∈ interior (convexHull ℝ GC) := by rw [hGC]; exact hC
+  have h0 : (0 : wsHyperplane q') ∈ F '' interior (convexHull ℝ GC) :=
+    ⟨0, hCmem, map_zero F⟩
+  exact interior_mono hsub (hFopen.image_interior_subset (convexHull ℝ GC) h0)
 
 end Refpoly

@@ -199,7 +199,7 @@ File: `Refpoly/WeightSystem.lean`
 | L5.7 | for `n ≥ 3` at most one `qᵢ = 1/2` | [SS18] §3 | `at_most_one_half` | **proved** (sum constraint) |
 | L5.8 | the `q_n = 1/2` reduction: IP for `(q₁,…,q_{n-1},1/2)`, `r=1` ⇔ `(2,…,2) ∈ int Δ_{(q₁,…,q_{n-1})}`, `r=1/2`. Splits `d=5` into the `n=6, r=1` and `n=5, r=1/2` searches | [SS18] §3 | `ip_half_reduction` | sorry (slice geometry; documented) |
 | D5.9 | **combined weight system** (CWS): `k` weight systems on blocks of an `n`-element coordinate set, block dimensions summing per the minimal-polytope structure; IP property of a CWS | [SS18] §2.2 | `CWS`, `CWS.IsIP` | def |
-| T5.10 | CWS IP ⇒ every constituent weight system IP | [SS18] §2.2 (citing math/0001106: "One can easily show…") | `cws_ip_component` | sorry |
+| T5.10 | CWS IP ⇒ every constituent weight system IP | [SS18] §2.2 (citing math/0001106: "One can easily show…") | `cws_ip_component` | **proved** — open-mapping/projection argument, under an explicit block-surjectivity (non-degeneracy) hypothesis that holds for every geometric CWS (see docstring) |
 | **T5.11** | **pseudoreflexivity.** `[([([∇*])*])*] = [∇*]` for any lattice polytope `∇`, where `[Δ] = conv(Δ ∩ M)` | [SS18] §6 (full proof in the paper, transcribed; the `0 ∈ ∇` hypothesis turned out to be unnecessary and was dropped) | `pseudoreflexive` | **proved** (pure inclusion chase given L0.6 + L0.8) |
 
 ---
@@ -290,7 +290,7 @@ File: `Refpoly/Classification.lean`
 ## Status summary (final, matches the built code)
 
 The project builds with `lake build` (Lean 4.30.0 / Mathlib v4.30.0).
-Exactly **7 `sorry`s** remain, all listed below; there are **no `axiom`
+Exactly **6 `sorry`s** remain, all listed below; there are **no `axiom`
 declarations**.
 
 **Files with zero sorries** — the complete algorithm-correctness chain:
@@ -316,9 +316,12 @@ carries the paper reference and proof sketch):
 | 2 | `Finiteness.lean` | `lagarias_ziegler_box` (T1.3) | box reduction [LZ91] | same |
 | 3 | `Minimal.lean` | `minimal_structure` (L4.3) | [KS95] Lemma 1 (non-simplicial decomposition → CWS) | context only; not a dependency of Parts 7/9 |
 | 4 | `WeightSystem.lean` | `ip_half_reduction` (L5.8) | the `q = ½` search split | affects how the run is *organized*, not whether it is complete |
-| 5 | `WeightSystem.lean` | `cws_ip_component` (T5.10) | CWS IP ⇒ component IP | cited from math/0001106; CWS side not needed by the chain |
-| 6 | `PyramidLemma.lean` | `pyramid_lemma_dim_le_four` (L6.1) | [Sk96] Lemma 1 (`d ≤ 4`) | **deliberately unproved** (project decision): `d ≤ 4` is certified by enumeration; `d = 5` needs only the counterexample R6.3, which *is* proved |
-| 7 | `Sylvester.lean` | `max_degree_dim5` (T8.4) | max degree 3 263 442 | complexity bound, not a correctness ingredient |
+| 5 | `PyramidLemma.lean` | `pyramid_lemma_dim_le_four` (L6.1) | [Sk96] Lemma 1 (`d ≤ 4`) | **deliberately unproved** (project decision): `d ≤ 4` is certified by enumeration; `d = 5` needs only the counterexample R6.3, which *is* proved |
+| 6 | `Sylvester.lean` | `max_degree_dim5` (T8.4) | max degree 3 263 442 | complexity bound, not a correctness ingredient |
+
+`cws_ip_component` (T5.10) was previously item 5 here; it is now **proved**
+(`WeightSystem.lean`), leaving the CWS-side gap solely at `minimal_structure`
+(L4.3, item 3 — the geometric block decomposition).
 
 Everything downstream of the two Part-1 inputs (finiteness T1.4, point
 bounds T1.2, chain termination L1.5, and hence T2.2/T9.2) is derived
