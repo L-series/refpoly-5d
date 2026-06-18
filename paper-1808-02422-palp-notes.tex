@@ -1,0 +1,292 @@
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{hyperref}
+
+\title{Notes on arXiv:1808.02422 and PALP Implementation Map}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+The paper classifies single weight systems whose Newton polytopes can give 5-dimensional reflexive polytopes, hence toric Calabi--Yau fourfold hypersurfaces. The core object is a normalized weight system
+\[
+q=(q_1,\dots,q_6),\qquad q_i>0,\qquad \sum_i q_i=1,
+\]
+equivalently integer weights \(w_i\) of total degree \(D=\sum_i w_i\), with \(q_i=w_i/D\).
+
+For such a system the Newton polytope is encoded by
+\[
+\Delta_q=\operatorname{conv}\{x\in\mathbb Z_{\ge0}^6:\ q\cdot x=1\}.
+\]
+After shifting \(x\mapsto x-(1,\dots,1)\), the point \((1,\dots,1)\) becomes the origin. The IP condition says this shifted origin lies strictly inside the polytope. The reflexivity condition says every facet has lattice distance one from the origin, equivalently the polar dual is again a lattice polytope.
+
+The paper's big result is an enumeration of all such six-weight systems for Calabi--Yau fourfolds. PALP in this repo implements the geometric core: generating/handling weight systems, constructing the associated polytopes, checking IP/reflexivity, constructing duals, and computing Hodge numbers.
+
+\section{Why weight systems encode simplices}
+
+Let \(M\cong\mathbb Z^d\), \(N=\operatorname{Hom}(M,\mathbb Z)\). A reflexive polytope \(\Delta\subset M_\mathbb R\) has polar dual
+\[
+\Delta^*=\{y\in N_\mathbb R:\langle y,x\rangle\ge -1\ \forall x\in\Delta\}.
+\]
+
+The Kreuzer--Skarke strategy begins on the dual side. A reflexive polytope has the origin as its unique interior lattice point. Its dual therefore contains a minimal IP polytope: a polytope containing the origin in its interior such that removing any vertex destroys that property.
+
+If the minimal IP polytope is a simplex with vertices
+\[
+V_1,\dots,V_n,
+\]
+then the condition \(0\in\operatorname{int}\operatorname{conv}(V_i)\) is equivalent to a positive affine relation
+\[
+\sum_i q_i V_i=0,\qquad q_i>0,\qquad \sum_i q_i=1.
+\]
+Those \(q_i\) are the normalized weights.
+
+For the paper's single-weight-system Calabi--Yau fourfold case, \(d=5\) and \(n=6\). Hence the relevant simplex has six vertices and gives six weights.
+
+PALP's closest recursive weight-system machinery is in:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Concept & PALP routine \\
+\midrule
+Weight-system recursion state & \texttt{PALP/cws.c:144--152}, \texttt{RgcClassData} \\
+Initial \(q\)-space simplex & \texttt{PALP/cws.c:293--311}, \texttt{ComputeQ0} \\
+Recursive weight construction & \texttt{PALP/cws.c:433--471}, \texttt{RecConstructRgcWeights} \\
+Add/deduplicate a candidate weight & \texttt{PALP/cws.c:172--230}, \texttt{RgcAddweight} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{From weights to the Newton polytope}
+
+Given integer weights \(w_i\) and degree \(D=\sum_i w_i\), monomials of weighted degree \(D\) correspond to exponent vectors
+\[
+x=(x_1,\dots,x_6)\in\mathbb Z_{\ge0}^6
+\]
+satisfying
+\[
+\sum_i w_i x_i=D.
+\]
+Dividing by \(D\), this is
+\[
+q\cdot x=1.
+\]
+
+The distinguished point
+\[
+\mathbf 1=(1,\dots,1)
+\]
+always satisfies \(q\cdot\mathbf1=1\). After shifting by \(\mathbf1\), it becomes the origin. The weight system is an IP weight system precisely when \(\mathbf1\) lies in the strict interior of
+\[
+\operatorname{conv}\{x\in\mathbb Z_{\ge0}^6:q\cdot x=1\}.
+\]
+
+PALP constructs these lattice points here:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Concept & PALP routine \\
+\midrule
+Read one weight system and build point list & \texttt{PALP/LG.c:690--695}, \texttt{Read\_W\_PP} \\
+Build polytope points from weights & \texttt{PALP/LG.c:625--683}, \texttt{Make\_Poly\_Points} \\
+CWS-to-polytope constructor & \texttt{PALP/Coord.c:1015--1175}, \texttt{Make\_CWS\_Points} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+In \texttt{Make\_CWS\_Points}, PALP computes a lattice basis, finds coordinate bounds, loops through admissible integer points, and stores the resulting \texttt{PolyPointList}.
+
+\section{The recursive enumeration idea}
+
+The difficult part is not checking one weight system; it is finding all of them without brute-forcing huge integer weights.
+
+The paper uses a recursive search in weight space.
+
+Suppose we have already chosen lattice points
+\[
+x^{(0)},x^{(1)},\dots,x^{(k)}
+\]
+that must lie in \(\Delta_q\). They impose linear equations
+\[
+q\cdot x^{(j)}=1.
+\]
+Together with \(q_i\ge0\), these equations define a rational polytope \(Q_k\) of possible weights:
+\[
+Q_k=\{q:\ q_i\ge0,\ q\cdot x^{(j)}=1\text{ for all }j\}.
+\]
+
+At each stage, the algorithm computes a representative point \(\bar q\), essentially the average of the vertices of \(Q_k\). If \(\bar q\) is a valid IP weight system, it is recorded.
+
+If \(\bar q\) is not the final answer, any true IP weight \(q\in Q_k\) must force the existence of some additional lattice point \(x\) with
+\[
+\bar q\cdot x<1.
+\]
+Otherwise all lattice points of \(\Delta_q\) would lie on or above the \(\bar q\)-hyperplane, preventing the required interior condition.
+
+So the recursive children are generated by enumerating nonnegative integer points \(x\) satisfying
+\[
+\bar q\cdot x<1.
+\]
+
+In PALP this is the heart of \texttt{cws.c}:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Algorithmic step & PALP routine \\
+\midrule
+Start with initial \(q\)-polytope & \texttt{ComputeQ0}, \texttt{PALP/cws.c:293--311} \\
+Intersect old \(Q\) with new condition \(q\cdot x=1\) & \texttt{ComputeQ}, \texttt{PALP/cws.c:321--362} \\
+Compute average candidate \(\bar q\) & \texttt{ComputeAndAddAverageWeight}, \texttt{PALP/cws.c:378--402} \\
+Handle final uniquely determined \(q\) & \texttt{ComputeAndAddLastQ}, \texttt{PALP/cws.c:405--430} \\
+Recursively enumerate new points \(x\) & \texttt{RecConstructRgcWeights}, \texttt{PALP/cws.c:433--471} \\
+Prune forbidden/redundant branches & \texttt{LastPointForbidden}, \texttt{PALP/cws.c:266--290} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The paper's production-scale 5D classifier was rewritten in C++, so the exact cluster enumeration code is not in this repo. But PALP's \texttt{cws.c} is the relevant ancestor and implements the same mathematical recursion.
+
+\section{The \(q_i\le 1/2\) bound and the half-weight case}
+
+A fundamental pruning fact is:
+\[
+q_i\le \frac12.
+\]
+
+Reason: if \(q_i>1/2\), then any solution of \(q\cdot x=1\) has \(x_i\in\{0,1\}\). Then the point \((1,\dots,1)\) cannot be strictly interior in the \(x_i\)-direction; it lies on the boundary. Thus no IP weight system has \(q_i>1/2\).
+
+The boundary case \(q_i=1/2\) is special. The paper separates it by reducing to a lower-dimensional search with total weight \(1/2\), then appending the extra weight \(1/2\). PALP has this explicitly as:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Concept & PALP routine \\
+\midrule
+Append final half-weight & \texttt{PALP/cws.c:577--604}, \texttt{AddHalf} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{IP and reflexivity checks}
+
+Once a candidate weight system produces a point list, PALP computes its facets.
+
+A lattice polytope \(\Delta\) with origin inside can be written as
+\[
+\Delta=\{x:\langle n_F,x\rangle\ge -a_F\text{ for all facets }F\},
+\]
+where \(n_F\in N\) is primitive and \(a_F>0\).
+
+Then:
+\begin{itemize}
+  \item IP means all \(a_F>0\).
+  \item Reflexive means all \(a_F=1\).
+\end{itemize}
+
+PALP implements this directly:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Test & PALP routine \\
+\midrule
+Find facets/equations & \texttt{PALP/Vertex.c:1081--1112}, \texttt{Find\_Equations} \\
+Check IP & \texttt{PALP/Vertex.c:1128--1153}, \texttt{IP\_Check} \\
+Check reflexivity & \texttt{PALP/Vertex.c:1170--1193}, \texttt{Ref\_Check} \\
+Build dual from equations & \texttt{PALP/Vertex.c:1201--1211}, \texttt{Make\_Dual\_Poly} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The difference between \texttt{IP\_Check} and \texttt{Ref\_Check} is exactly the difference between ``facet distance positive'' and ``facet distance equal to one.''
+
+\section{Dual polytope and Hodge numbers}
+
+For a reflexive \(\Delta\), the dual \(\Delta^*\) is also a lattice polytope. Batyrev's formulas express Hodge numbers of the Calabi--Yau hypersurface in terms of lattice points on faces of \(\Delta\) and \(\Delta^*\).
+
+For dimension \(d=5\), the hypersurface has dimension \(4\). The relevant Hodge numbers are
+\[
+h^{1,1},\quad h^{1,2},\quad h^{1,3},\quad h^{2,2}.
+\]
+
+The general Batyrev formula used by PALP is:
+\[
+\begin{aligned}
+h^{1,i}
+&=
+\delta_{1i}
+\left(
+\ell(\Delta^*)-d-1
+-\sum_{\operatorname{codim}\Theta^*=1}\ell^*(\Theta^*)
+\right) \\
+&\quad+
+\delta_{d-2,i}
+\left(
+\ell(\Delta)-d-1
+-\sum_{\operatorname{codim}\Theta=1}\ell^*(\Theta)
+\right) \\
+&\quad+
+\sum_{\operatorname{codim}\Theta^*=i+1}
+\ell^*(\Theta^*)\ell^*(\Theta).
+\end{aligned}
+\]
+
+Here:
+\begin{itemize}
+  \item \(\ell(\Theta)\) is the number of lattice points on a face.
+  \item \(\ell^*(\Theta)\) is the number of lattice points in the relative interior of that face.
+  \item \(\Theta\) and \(\Theta^*\) are dual faces.
+\end{itemize}
+
+For \(d=5\), PALP also uses
+\[
+h^{2,2}=44+4h^{1,1}-2h^{1,2}+4h^{1,3}.
+\]
+
+PALP routines:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Concept & PALP routine \\
+\midrule
+Build face incidence structure & \texttt{PALP/Vertex.c:179--264}, \texttt{Make\_Incidence} \\
+Count interior face points & \texttt{PALP/Vertex.c:1406--1429}, \texttt{Make\_FaceIPs} \\
+Evaluate Batyrev formula & \texttt{PALP/Vertex.c:1447--1470}, \texttt{Eval\_BaHo} \\
+Full reflexive Hodge computation & \texttt{PALP/Vertex.c:1472--1489}, \texttt{RC\_Calc\_BaHo} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The line
+\begin{verbatim}
+_BH->h22 = 44 + 4 * h1[1] + 4 * h1[3] - 2 * h1[2];
+\end{verbatim}
+at \texttt{PALP/Vertex.c:1468--1470} is exactly the fourfold formula for \(h^{2,2}\).
+
+\section{End-to-end algorithm, mapped to PALP}
+
+For one candidate weight system:
+\begin{enumerate}
+  \item Generate or read weights. Recursive generation is represented by \texttt{PALP/cws.c}, especially \texttt{RecConstructRgcWeights}.
+  \item Construct lattice points of \(\Delta_q\): \texttt{PALP/LG.c:625--683}, \texttt{Make\_Poly\_Points}, or CWS path \texttt{PALP/Coord.c:1015--1175}, \texttt{Make\_CWS\_Points}.
+  \item Compute facets: \texttt{PALP/Vertex.c:1081--1112}, \texttt{Find\_Equations}.
+  \item Check IP/reflexivity: \texttt{PALP/Vertex.c:1128--1153}, \texttt{IP\_Check}; \texttt{PALP/Vertex.c:1170--1193}, \texttt{Ref\_Check}.
+  \item Construct dual polytope: \texttt{PALP/Vertex.c:1201--1211}, \texttt{Make\_Dual\_Poly}.
+  \item Complete point lists: \texttt{PALP/Vertex.c:1308--1378}, \texttt{Complete\_Poly}.
+  \item Compute face incidence and interior face counts: \texttt{PALP/Vertex.c:179--264}, \texttt{Make\_Incidence}; \texttt{PALP/Vertex.c:1406--1429}, \texttt{Make\_FaceIPs}.
+  \item Compute Hodge numbers: \texttt{PALP/Vertex.c:1447--1470}, \texttt{Eval\_BaHo}; \texttt{PALP/Vertex.c:1472--1489}, \texttt{RC\_Calc\_BaHo}.
+\end{enumerate}
+
+The paper's novelty is the enormous optimized enumeration of all 5D single weight systems; PALP supplies the core polyhedral geometry routines that decide whether each candidate is IP/reflexive and compute its Hodge data.
+
+\end{document}
