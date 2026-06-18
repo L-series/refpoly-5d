@@ -483,6 +483,2100 @@ not covered by Theorem~\ref{thm:ks}, hence frontier work.
 \end{remark}
 
 %==============================================================
+\section{The enumeration algorithm and its PALP implementation}
+\label{sec:algo}
+%==============================================================
+
+Sections~\ref{sec:finite}--\ref{sec:weights} are the \emph{theory}; this
+section is the \emph{implementation}. We trace each conceptual step to the
+concrete PALP source present in the repository at
+\texttt{PALP/} (the package of Kreuzer--Skarke, arXiv:math/0204356), naming
+the actual files, functions, structs, and compile-time constants. Two
+companion executables carry the bulk of the work:
+\begin{itemize}
+  \item \texttt{cws.x} (built from \texttt{PALP/cws.c}): enumerates weight
+        systems (WS) and combined weight systems (CWS), builds the
+        associated polytope, and tests reflexivity;
+  \item \texttt{poly.x} / \texttt{class.x} (\texttt{PALP/poly.c},
+        \texttt{PALP/class.c}): compute the $GL(d,\mathbb{Z})$ normal form,
+        enumerate reflexive subpolytopes, and deduplicate.
+\end{itemize}
+
+\begin{remark}[Global size constants]\label{rmk:constants}
+All array bounds are set at compile time in \texttt{PALP/Global.h}. The
+governing constant is
+\begin{equation}
+  \texttt{POLY\_Dmax} = 6
+  \quad(\text{max polytope dimension; set via } \texttt{-D POLY\_Dmax}),
+\end{equation}
+from which derive \texttt{POINT\_Nmax}, \texttt{VERT\_Nmax},
+\texttt{EQUA\_Nmax} (tuned in $\texttt{if}/\texttt{elif}$ blocks on
+\texttt{POLY\_Dmax}); the \emph{ambient} (redundant-coordinate) dimension of
+a CWS is bounded by $\texttt{AMBI\_Dmax} = 5\cdot\texttt{POLY\_Dmax} = 30$,
+and a single weight system has at most $\texttt{W\_Nmax} = \texttt{POLY\_Dmax}+1$
+entries (\texttt{PALP/LG.h}, \texttt{PALP/Nef.h}). For the \texttt{refpoly-5d}
+target $d=5$ one compiles with $\texttt{POLY\_Dmax}=5$ (or $6$). The WS list
+buffer is \texttt{WDIM}~$=800000$ in \texttt{cws.c}.
+\end{remark}
+
+%--------------------------------------------------------------
+\subsection{Step W1 --- bounding a single weight system}
+\label{sec:algo-singleWS}
+%--------------------------------------------------------------
+
+We make Definition~\ref{def:weights} algorithmic. Work with coprime
+positive \emph{integer} weights $w=(w_0,\dots,w_N)$ of length $N{+}1$
+($N = d$ for a length-$(d{+}1)$ system) and degree
+$\mathfrak{d} = \sum_i w_i$. The simplex of $w$ has $0$ in its interior iff
+each weight is strictly positive and the relation $\sum_i w_i v_i = 0$
+spans (Definition~\ref{def:ipweights}).
+
+\subsubsection*{The interior-point criterion}
+
+The whole enumeration rests on a single geometric equivalence, which we now
+state and prove cleanly. It is the precise sense in which a weight system
+``is'' an IP simplex.
+
+\begin{lemma}[Interior-point criterion]\label{lem:ipcrit}
+Let $v_0,v_1,\dots,v_d \in \mathbb{R}^d$ be the vertices of a non-degenerate
+$d$-simplex (so the $v_i$ affinely span $\mathbb{R}^d$ and no $d$ of them lie
+in a common hyperplane through any putative interior point). Because $d{+}1$
+points in $\mathbb{R}^d$ are affinely dependent, there is a linear relation
+\begin{equation}\label{eq:ipcrit}
+  \sum_{i=0}^{d} w_i\, v_i = 0,
+  \qquad \sum_{i=0}^{d} w_i = c > 0,
+\end{equation}
+unique up to overall scale, with coefficients $w_i$. Then
+\[
+  0 \in \operatorname{int}\operatorname{conv}\{v_0,\dots,v_d\}
+  \qquad\Longleftrightarrow\qquad
+  w_i > 0 \ \text{ for every } i .
+\]
+That is: the origin is interior to the simplex if and only if the (essentially
+unique) affine dependence among the vertices has \emph{all positive}
+coefficients, i.e.\ the $w_i$ form a genuine weight system. Equation
+\eqref{eq:ipcrit} is exactly the circuit relation~\eqref{eq:circuit}
+of Definition~\ref{def:weights}.
+\end{lemma}
+
+\begin{proof}
+A point $x$ lies in $\operatorname{conv}\{v_0,\dots,v_d\}$ iff it is a convex
+combination $x=\sum_i \lambda_i v_i$ with $\lambda_i\ge 0$,
+$\sum_i\lambda_i=1$; for a simplex these \emph{barycentric coordinates}
+$\lambda_i(x)$ are \emph{unique} (the $v_i$ are affinely independent). The
+relative interior of the simplex is precisely the locus where all barycentric
+coordinates are strictly positive,
+\[
+  x\in\operatorname{int}\operatorname{conv}\{v_i\}
+  \iff \lambda_i(x)>0 \ \forall i ,
+\]
+since a boundary face is cut out by setting one or more $\lambda_i=0$.
+
+Now compute the barycentric coordinates of the origin. Normalize the relation
+\eqref{eq:ipcrit} by dividing through by $c=\sum_i w_i>0$ and set
+$\lambda_i := w_i/c$. Then
+\[
+  \sum_{i=0}^{d}\lambda_i v_i = \tfrac{1}{c}\sum_i w_i v_i = 0,
+  \qquad \sum_{i=0}^{d}\lambda_i = \tfrac{1}{c}\sum_i w_i = 1 ,
+\]
+so $(\lambda_0,\dots,\lambda_d)$ \emph{are} the barycentric coordinates of
+$0$ with respect to the simplex (and by uniqueness they are the \emph{only}
+such coordinates). Hence
+\[
+  0\in\operatorname{int}\operatorname{conv}\{v_i\}
+  \iff \lambda_i>0\ \forall i
+  \iff w_i>0\ \forall i ,
+\]
+the last equivalence because $\lambda_i = w_i/c$ and $c>0$. This proves both
+directions.
+
+For the reverse direction stated concretely: if some $w_j\le 0$ then either
+$\lambda_j=0$ (origin on the facet opposite $v_j$) or $\lambda_j<0$ (origin
+outside that facet), so $0$ is not interior. Conversely if all $w_i>0$ the
+displayed convex combination exhibits $0$ with strictly positive weights,
+forcing it into the interior. $\square$
+\end{proof}
+
+\begin{remark}[Reading the lemma]\label{rmk:ipcrit}
+Three points deserve emphasis. (i) The relation~\eqref{eq:ipcrit} always
+exists and is unique up to scale --- this is just the affine dependence of
+$d{+}1$ points in $\mathbb{R}^d$; the \emph{content} of the IP property is
+entirely in the \emph{signs} of its coefficients. (ii) The normalization
+$\sum_i w_i=c$ is a choice of scale; PALP fixes it by clearing denominators to
+coprime integers, so $c=\mathfrak d=\sum_i w_i$ is the \emph{degree}, and the
+barycentric coordinates of $0$ are $q_i=w_i/\mathfrak d$ --- the rational
+weights of Definition~\ref{def:weights}. (iii) Geometrically the lemma says a
+weighted projective space $\mathbb{P}^d_{(w_0,\dots,w_d)}$ is well posed
+(its fan fills $\mathbb{R}^d$, $0$ strictly inside) exactly when all weights
+are positive. This is the criterion the search of
+Proposition~\ref{prop:wbounds} screens for, and the IP test
+\texttt{IP\_Check} (Remark~\ref{rmk:ipref-code}) verifies on the realized
+lattice points.
+\end{remark}
+
+\begin{proposition}[Search-bounding inequalities for IP weights]
+\label{prop:wbounds}
+Order $w_0 \le w_1 \le \cdots \le w_N$ and fix the degree $\mathfrak{d}$.
+For the system to be a normalized ($\sum q_i =1$) IP weight system one needs
+\begin{equation}\label{eq:wbounds}
+  w_i \ \le\ \frac{\mathfrak{d}}{\,N - i + 1\,},
+  \qquad\text{and}\qquad
+  \gcd(w_0,\dots,w_N) = 1 ,
+\end{equation}
+together with the largest-weight bound $w_N \le \mathfrak{d}/2$ when the
+system is IP (no single weight may reach half the degree without forcing
+$q_i \ge \tfrac12$, which destroys the interior-point property in the
+remaining directions). These turn the enumeration into a finite
+\emph{ordered partition} of $\mathfrak{d}$.
+\end{proposition}
+
+\begin{proposition}[Finiteness of the IP weight space and its search box]
+\label{prop:wsfinite}
+Fix the length $N{+}1$ (equivalently $d=N$). The set of IP weight systems
+$w=(w_0\le\cdots\le w_N)$, coprime and positive, of \emph{any} degree
+$\mathfrak d$, is \emph{finite}. Moreover, at each \emph{fixed} degree
+$\mathfrak d$ the candidate set is contained in the finite box carved out
+by~\eqref{eq:wbounds}, so the enumeration over $\mathfrak d \in
+[D_{\min},D_{\max}]$ is a finite union of finite ordered partitions.
+\end{proposition}
+
+\begin{proof}[Mechanism, and why the bound is genuine]
+There are two finiteness statements, one nested inside the other.
+
+\emph{(a) Finitely many candidates at a fixed degree.} With the weights sorted
+$w_0\le\cdots\le w_N$ and $\sum_i w_i=\mathfrak d$ fixed, each $w_i$ is a
+positive integer and the partial sums are bounded by $\mathfrak d$; there are
+only finitely many such ordered tuples (ordered partitions of the integer
+$\mathfrak d$ into exactly $N{+}1$ positive parts). The per-slot
+cap~\eqref{eq:wbounds}, $w_i\le \mathfrak d/(N-i+1)$, is the sharp form of
+this: in sorted order the $N-i+1$ weights $w_i\le w_{i+1}\le\cdots\le w_N$ are
+each $\ge w_i$, so their sum $\ge (N-i+1)\,w_i$ cannot exceed $\mathfrak d$.
+This makes the box explicitly finite and small.
+
+\emph{(b) Finitely many relevant degrees.} The IP property itself caps the
+degree. By Lemma~\ref{lem:ipcrit} the normalized weights $q_i=w_i/\mathfrak d$
+are the barycentric coordinates of an \emph{interior} point, so
+$0<q_i<1$, i.e.\ $1\le w_i<\mathfrak d$ and in particular the largest weight
+satisfies $w_N\le \mathfrak d/2$ (if $w_N>\mathfrak d/2$ then
+$q_N>\tfrac12$ and the remaining $q_i$ sum to $<\tfrac12$ on $N$ slots, which
+collapses the simplex against the facet opposite $v_N$ and destroys
+interiority in that direction). Combined with reflexivity --- the IP simplex
+that survives must be a \emph{reflexive} simplex, whose normalized volume is
+bounded by Hensley's theorem (Theorem~\ref{thm:hensley}) with $k=1$ interior
+point --- the degree $\mathfrak d=\sum_i w_i$ is bounded by a constant
+$\mathfrak d_{\max}(d)$ depending only on $d$. (The extremal IP weight systems
+are the Sylvester-type ones of Remark following Theorem~\ref{thm:hensley};
+they saturate this degree bound.) Hence only finitely many degrees
+$\mathfrak d\le \mathfrak d_{\max}(d)$ contribute, and over each the candidate
+box of part~(a) is finite. The two together give a finite search space.
+$\square$
+\end{proof}
+
+\begin{remark}[Theory bound $\Leftrightarrow$ loop bound, explicitly]
+\label{rmk:boundmatch}
+The two finiteness mechanisms of Proposition~\ref{prop:wsfinite} map
+\emph{exactly} onto the two loop layers of \texttt{MakeIpWeights}:
+\begin{itemize}
+  \item \emph{Outer loop = part (b).} The degree is iterated over the finite
+        window $[\texttt{from\_d},\texttt{to\_d}]$ supplied by the user
+        (which one sets to $[1,\mathfrak d_{\max}(d)]$ to be exhaustive):
+        \texttt{for (W.d = from\_d; W.d <= to\_d; W.d++)}.
+        Inside it the largest weight is seeded at $\mathfrak d/2$ and decreased
+        while it stays $\ge \mathfrak d/N$:
+        \texttt{for (W.w[N-1] = W.d/2; W.d <= N*W.w[N-1]; W.w[N-1]--)} ---
+        i.e.\ the $w_N\le\mathfrak d/2$ ceiling and the $w_N\ge\mathfrak d/N$
+        floor of the IP property are the literal loop endpoints.
+  \item \emph{Inner recursion = part (a).} \texttt{Rec\_IpWeights} fills
+        $w_{N-1},\dots,w_0$ downward with $\texttt{wmax} = \mathfrak
+        d/(N-i+1)$ (the slot cap of~\eqref{eq:wbounds}), capped further by
+        $w_i\le w_{i+1}$ (sorted) and by $\texttt{sum}-i$ (leave $\ge 1$ for
+        each remaining slot). The recursion bottoms out at $w_0=\texttt{sum}$
+        and accepts iff $\gcd=1$. Every node of this recursion tree is a
+        lattice point of the finite box of part~(a); the tree is finite
+        precisely \emph{because} the box is.
+\end{itemize}
+Thus the a~priori finiteness argument is not merely an existence statement ---
+its two quantitative ingredients ($\mathfrak d\le\mathfrak d_{\max}$ and
+$w_i\le\mathfrak d/(N-i+1)$) are the actual termination guarantees of the two
+loops.
+\end{remark}
+
+\begin{remark}[Where this lives in the code]\label{rmk:wbounds-code}
+This is implemented \emph{verbatim} in \texttt{cws.c}. The driver
+\texttt{Make\_IP\_Weights}$(d, D_{\min}, D_{\max}, \dots)$ calls
+\texttt{MakeIpWeights(N=d+1, \dots)}, which loops the degree
+$\mathfrak{d}=\texttt{W.d}$ over $[D_{\min},D_{\max}]$ and seeds the largest
+weight with the bound
+\begin{verbatim}
+for (W.w[N-1] = W.d/2; W.d <= N*W.w[N-1]; W.w[N-1]--)
+\end{verbatim}
+($w_{N-1}\le \mathfrak d/2$, and the loop guard $\mathfrak d \le N\,w_{N-1}$
+is exactly $w_{N-1}\ge \mathfrak d/N$, i.e.\ it is the \emph{largest}
+weight). The recursion \texttt{Rec\_IpWeights} then fills the remaining
+weights downward with the per-slot cap from~\eqref{eq:wbounds}:
+\begin{verbatim}
+int wmax = W->d / (W->N - n + 1);     /* = d/(N-i+1)   */
+wmax = min(wmax, W->w[n + 1]);         /* keep w_i <= w_{i+1} (sorted) */
+wmax = min(wmax, sum - n);             /* leave room: each later w >= 1 */
+\end{verbatim}
+and enforces coprimality at the leaf via
+$\texttt{Fgcd}(g,\texttt{W.w[0]})=1$ before accepting a candidate. So the
+$d/(N-i+1)$ cap, the sorted ordering $w_0\le\cdots\le w_N$, and the
+$\gcd=1$ condition of Proposition~\ref{prop:wbounds} are precisely the three
+pruning rules of \texttt{Rec\_IpWeights}.
+\end{remark}
+
+\begin{remark}[IP and reflexivity test for a single WS]\label{rmk:ipref-code}
+Each accepted weight system is handed to
+\texttt{IfIpWWrite(W,P,\dots)} (\texttt{cws.c}), which
+\begin{enumerate}
+  \item builds the lattice points of the weighted simplex via
+        \texttt{Make\_Poly\_Points(W,P)};
+  \item calls \texttt{IP\_Check(P,\&V,\&E)} (\texttt{PALP/Vertex.c}) to test
+        the interior-point property (Definition~\ref{def:ip}) and to compute
+        the facet equations \texttt{E};
+  \item declares the polytope \emph{reflexive} iff every facet equation has
+        constant term $1$:
+\begin{verbatim}
+while (r && (++i < E.ne)) if (E.e[i].c != 1) r = 0;  /* r==1 <=> reflexive */
+\end{verbatim}
+\end{enumerate}
+The test ``\texttt{E.e[i].c == 1} for all facets'' is the computational form
+of reflexivity: in the convention of \texttt{Global.h}'s \texttt{Equation}
+($\sum_j a_j x_j + c \ge 0$ on the polytope, $=0$ on the facet), all facets
+at lattice distance $1$ from the interior point $0$ is exactly the dual
+polytope being a lattice polytope --- i.e.\ the Gorenstein/reflexivity
+condition of Theorem~\ref{thm:reflexweight}.
+\end{remark}
+
+\begin{remark}[The dual ``Rgc'' enumeration: weights from points]
+\label{rmk:rgc}
+PALP also contains the \emph{reverse} routine \texttt{RgcWeights} /
+\texttt{RecConstructRgcWeights} (\texttt{cws.c}, option \texttt{cws.x -d}),
+which enumerates the weight systems realizing all IP simplices on a bounded
+point set rather than partitioning a fixed degree. Its state lives in
+\texttt{RgcClassData} (fields \texttt{d}, \texttt{r2}, \texttt{allow11},
+\texttt{f0[]}, the equation list \texttt{q[n]} and incidences
+\texttt{qI[n]}). It builds the linear system incrementally:
+\texttt{ComputeQ0} seeds the constraints from the parameter \texttt{r2}
+(controlling whether the bounding box is the standard
+$\{x_i\ge 0,\ \sum \le \texttt{r2}\}$ region), \texttt{ComputeQ} updates the
+facet/circuit equations \texttt{q[n]} when a new spanning point \texttt{x[n]}
+is adjoined, and \texttt{ComputeAndAddAverageWeight} forms the weight as the
+positive average of the surviving equations. The pruning predicate
+\texttt{LastPointForbidden} encodes the search bounds directly:
+\begin{verbatim}
+if (ysum < 2) return 1;                       /* point too small */
+if (ysum == 2) if ((!X->allow11)||(ymax==2)) return 1;  /* forbid (1,1,..) */
+if (X->r2 == 2) if (ymax < 2) return 1;
+for (l = X->f0[n-1]; l < X->d-1; l++)
+   if (y[l] < y[l+1]) return 1;               /* enforce sorted coordinates */
+\end{verbatim}
+The final IP test for a candidate weight is \texttt{WsIpCheck} (it
+materializes the simplex points, runs \texttt{Find\_Equations}, and rejects
+if fewer than $d$ facets or if the all-ones point fails an equation with
+$c=0$). The flag \texttt{allow11} is the switch that decides whether weight
+$(1,1)$-blocks --- the seeds of the product/$\mathbb{P}^1$ factors of
+Section~\ref{sec:min} --- are permitted.
+\end{remark}
+
+%--------------------------------------------------------------
+\subsection{Step W2 --- which combined weight systems are valid}
+\label{sec:algo-cws}
+%--------------------------------------------------------------
+
+We now make Definition~\ref{def:combined} and
+Theorem~\ref{thm:minstructure} algorithmic. The question ``how do we know
+all valid \emph{types} of CWS?'' has a clean combinatorial answer that is
+mirrored exactly by the \texttt{CWS} data structure.
+
+\begin{definition}[Combinatorial type of a CWS]\label{def:cwstype}
+A CWS in dimension $d$ is specified by: (i) an ordered list of $r$ weight
+systems $w^{(1)},\dots,w^{(r)}$ of lengths $N_1{+}1,\dots,N_r{+}1$; and
+(ii) for each, an \emph{embedding} of its weights into the columns of a
+common ambient index set $\{1,\dots,\mathcal N\}$, such that the simplicial
+blocks span \emph{complementary} sublattices meeting only at $0$ and
+\begin{equation}\label{eq:cwsspan}
+  \sum_{j=1}^{r} N_j \;-\; (\text{number of shared/identified coordinates})
+  \;=\; d .
+\end{equation}
+The \emph{combinatorial type} records which coordinates each block occupies
+and how many it shares with its neighbours (the overlap parameter, denoted
+$u$ in the code).
+\end{definition}
+
+\begin{theorem}[Validity = complementary span; KS 1998/2000]
+\label{thm:cwsvalid}
+A list of IP weight systems assembles into a valid (IP, hence
+$0$-interior) CWS of dimension $d$ iff each block individually has the IP
+property and the chosen embedding makes the blocks' affine spans
+complementary subject to~\eqref{eq:cwsspan}. The resulting
+$\nabla=\operatorname{conv}(\bigsqcup_j V_j)$ then has $0$ in its interior
+because $0$ is interior to each block's span and the spans cover
+$N_{\mathbb{R}}$.
+\end{theorem}
+
+This is the precise content of Theorem~\ref{thm:minstructure}: the allowed
+combined structures are exactly the ways to tile the $d$ ambient directions
+by simplicial circuits, possibly sharing coordinates.
+
+\begin{remark}[The \texttt{CWS} struct mirrors
+Definition~\ref{def:cwstype}]\label{rmk:cwsstruct}
+The structure in \texttt{PALP/Global.h} is
+\begin{verbatim}
+typedef struct {
+  EqList B;
+  Long W[AMBI_Dmax][AMBI_Dmax], d[AMBI_Dmax];
+  int  nw, N, z[POLY_Dmax][AMBI_Dmax], m[POLY_Dmax], nz, index;
+} CWS;
+\end{verbatim}
+Here \texttt{nw}~$=r$ is the number of weight systems; \texttt{W[i][j]} is
+the $j$-th weight of the $i$-th system, padded with zeros in the columns it
+does \emph{not} occupy; \texttt{d[i]} is that system's degree
+$\mathfrak{d}_i$; \texttt{N}~$=\mathcal N$ is the ambient
+(redundant-coordinate) dimension; and \texttt{B} (an \texttt{EqList})
+records the coordinate hyperplanes expressing the genuine $d$ coordinates in
+terms of the $\mathcal N$ redundant ones (so the true dimension is
+$d = \mathcal N - \texttt{nw}$ when there is no extra sublattice quotient).
+The fields \texttt{z[][]}, \texttt{m[]}, \texttt{nz} carry the phases of the
+finite abelian quotient symmetries used when the polytope lives on a
+\emph{sublattice} (the ``$+\mathbb{Z}_k$'' factors), and \texttt{index} is
+the sublattice index.
+\end{remark}
+
+\begin{remark}[How the embeddings are generated:
+\texttt{W\_TO\_CWS}/\texttt{RW\_TO\_CWS}]\label{rmk:wtocws}
+The zero-padding embedding of Definition~\ref{def:cwstype} is performed by
+two twin routines in \texttt{cws.c}:
+\begin{verbatim}
+void W_TO_CWS (CWS *CW, Weight *_W, int Nf, int Nr, int Nb, int u);
+void RW_TO_CWS(CWS *CW, Weight *_W, int Nf, int Nr, int Nb, int u);
+\end{verbatim}
+They write the weights of \texttt{\_W} into row \texttt{CW->W[CW->nw]} with
+\texttt{Nf} leading zeros, \texttt{Nr} trailing zeros, and \texttt{Nb} zeros
+inserted \emph{inside} after the first \texttt{u} weights:
+\begin{verbatim}
+/* d (Nf x 0) w_1 ... w_u (Nb x 0) w_{u+1} ... w_N (Nr x 0) */
+CW->N = (Nf + Nb + Nr + _W->N);
+if (CW->N > AMBI_Dmax) Die("increase AMBI_Dmax !");
+\end{verbatim}
+(\texttt{RW\_TO\_CWS} is the same but writes the weights \emph{reversed}, used
+to align overlaps from the opposite end). The parameter $u$ is exactly the
+\emph{overlap} of Definition~\ref{def:cwstype}: it is how many coordinates
+the block shares with a neighbour, and the bookkeeping
+$\texttt{Nf}/\texttt{Nr}/\texttt{Nb}$ places each block into its
+complementary slice of the $\mathcal N$ ambient columns so
+that~\eqref{eq:cwsspan} holds. The orchestrators (e.g.\
+\texttt{Make\_nno\_CWS}, and \texttt{Make\_IP\_CWS} for $d>4$) enumerate the
+allowed overlap patterns --- the ``valid CWS types'' --- and call these
+emitters with the appropriate $(\texttt{Nf},\texttt{Nr},\texttt{Nb},u)$ for
+each block; \texttt{PrintCWSTypes} (option \texttt{cws.x -c\# -t}) lists the
+enumerated types.
+\end{remark}
+
+\begin{remark}[Choosing sub-weight-systems: \texttt{Select\_n\_of\_W}]
+\label{rmk:select}
+A subtlety in forming CWS is that a single weight system can contribute a
+\emph{sub-simplex} to a combined structure. The routine
+\texttt{Select\_n\_of\_W} with its recursive helper \texttt{next\_n}
+(\texttt{cws.c}) enumerates the ways to select $n$ of the $N$ weight columns
+to form a block, respecting the sorted-equal-weights structure (it only
+descends into a new column when \texttt{\_W->w[i] > \_W->w[i-1]}, avoiding
+duplicate selections among equal weights). This is the code-level
+realization of ``a block $V_j$ is an affinely independent sub-collection
+spanning a $d_j$-dimensional sublattice'' from
+Theorem~\ref{thm:minstructure}.
+\end{remark}
+
+%--------------------------------------------------------------
+\subsection{Enumerating \emph{all} valid CWS types, and the $d=5$ table}
+\label{sec:algo-cwstypes}
+%--------------------------------------------------------------
+
+Theorem~\ref{thm:cwsvalid} tells us \emph{when} a list of weight systems is a
+valid CWS; it does not yet tell us \emph{how many} combinatorial types there
+are in a given dimension. We now extract the full type list from the
+structural lemmas, then write it out explicitly for $d=5$.
+
+\begin{proposition}[Enumeration of CWS combinatorial types]\label{prop:cwsenum}
+Fix $d$. A combinatorial type of CWS is the data of
+Definition~\ref{def:cwstype}: an unordered multiset of weight systems
+$w^{(1)},\dots,w^{(r)}$ of \emph{lengths} $\ell_j=N_j{+}1\in\{2,\dots,d{+}1\}$
+(so block dimension $N_j=\ell_j-1\ge 1$), together with an overlap pattern
+recording, for each pair of blocks, how many ambient coordinates they share.
+Validity (Theorem~\ref{thm:cwsvalid}) imposes the single
+\emph{span/overlap} equation~\eqref{eq:cwsspan},
+\begin{equation}\label{eq:cwsdimcount}
+  \sum_{j=1}^{r} N_j \;-\; u_{\mathrm{tot}} \;=\; d ,
+  \qquad
+  u_{\mathrm{tot}} = \text{total number of identified (shared) coordinates},
+\end{equation}
+where each pairwise overlap $u\ge 0$ must leave every block with the IP
+property on its own span and may not identify a block entirely inside another.
+The number of CWS types in dimension $d$ is therefore the (finite) number of
+solutions of~\eqref{eq:cwsdimcount}: partitions of the ``ambient excess''
+$\sum_j N_j - d = u_{\mathrm{tot}}$ over the allowed pairwise overlaps,
+ranging $r$ from $1$ (a single WS, $u_{\mathrm{tot}}=0$, $N_1=d$) up to $d$
+(all blocks one-dimensional, the $2^{\,r}$-vertex ``products of
+$\mathbb{P}^1$'').
+\end{proposition}
+
+\begin{remark}[Why the count is finite and small]
+Each block has $N_j\ge 1$ and contributes at least one ambient column, while
+$r\le d$ (a block of dimension $\ge 1$ per summand of $\sum N_j$, with
+$\sum N_j\ge d$). The overlaps are bounded by the block sizes, $0\le u\le
+\min(N_i,N_j)-1$. So only finitely many $(r;N_1,\dots,N_r;\text{overlaps})$
+satisfy~\eqref{eq:cwsdimcount}; in low $d$ they can be listed by hand. This is
+the combined-weight analogue of the single-WS finiteness of
+Proposition~\ref{prop:wsfinite}.
+\end{remark}
+
+\paragraph{Notation for types.} Following the PALP source comments we write a
+type as a string of block-lengths joined by either ``\texttt{x}'' (disjoint,
+overlap $u=0$) or ``\texttt{u}'' (one shared coordinate, overlap $u=1$), with
+``\texttt{uu}'' for $u=2$, etc. Thus \texttt{3x3} is two length-$3$ systems on
+disjoint coordinates, \texttt{3u4} is a length-$3$ and a length-$4$ sharing
+one coordinate, \texttt{4uu4} is two length-$4$ systems sharing two. The block
+of length $\ell$ has dimension $N=\ell-1$, and~\eqref{eq:cwsdimcount} reads
+$\sum_j(\ell_j-1)-u_{\mathrm{tot}}=d$.
+
+\begin{example}[The complete $d=4$ type list, as hard-coded in PALP]
+\label{ex:cws4types}
+For $d=4$ the function \texttt{Make\_34\_CWS} (\texttt{cws.c}) enumerates
+\emph{exactly} these types (one \texttt{mkold2}/\texttt{mkold\_nno}/\texttt{mk\dots}
+call each):
+\[
+\begin{array}{lll}
+\text{type} & (\ell_j) & \sum(\ell_j{-}1)-u_{\mathrm{tot}}=4\\\hline
+\texttt{5}        & (5)        & 4-0=4 \quad(\text{single WS, }r{=}1)\\
+\texttt{4uu4}     & (4,4)      & (3{+}3)-2=4\\
+\texttt{3u4}      & (3,4)      & (2{+}3)-1=4\\
+\texttt{3x3}      & (3,3)      & (2{+}2)-0=4\\
+\texttt{2x4}      & (2,4)      & (1{+}3)-0=4\\
+\texttt{3u3x2}    & (3,3,2)    & (2{+}2{+}1)-1=4\\
+\texttt{3x2x2}    & (3,2,2)    & (2{+}1{+}1)-0=4\\
+\texttt{3u3u3}    & (3,3,3)    & (2{+}2{+}2)-2=4\\
+\texttt{2x2x2x2}  & (2,2,2,2)  & (1{+}1{+}1{+}1)-0=4
+\end{array}
+\]
+(the single length-$5$ WS is handled by \texttt{Make\_34\_Weights}, the rest by
+the listed \texttt{Make\_34\_CWS} calls). This is the literal content of lines
+\texttt{if (d == 4)\,\{\dots\}} in \texttt{Make\_34\_CWS}.
+\end{example}
+
+\begin{theorem}[The complete $d=5$ CWS type list]\label{thm:cws5types}
+Solving~\eqref{eq:cwsdimcount} with $d=5$, block lengths
+$\ell_j\in\{2,\dots,6\}$, and admissible overlaps gives the following
+combinatorial types of minimal $5$-dimensional CWS. (We list them by number of
+blocks $r$; ``$+\mathbb{Z}_k$'' sublattice refinements are \emph{not} separate
+combinatorial types --- they are extra data on the same type, carried by the
+\texttt{z[][]}/\texttt{nz}/\texttt{index} fields of the \texttt{CWS} struct.)
+\[
+\begin{array}{lll}
+r & \text{type } (\ell_j;\,\text{overlaps}) & \sum(\ell_j{-}1)-u_{\mathrm{tot}}=5\\\hline
+1 & \texttt{6}        & 5-0=5\\[2pt]
+2 & \texttt{5uuu5}    & (4{+}4)-3=5\\
+2 & \texttt{4uu5}     & (3{+}4)-2=5\\
+2 & \texttt{4u4}      & (3{+}3)-1=5\\
+2 & \texttt{3u5}\;(u{=}1?) & \text{not valid: }(2{+}4)-1=5\ \checkmark\ \Rightarrow \texttt{3u5}\\
+2 & \texttt{3x4}      & (2{+}3)-0=5\\
+2 & \texttt{2x5}      & (1{+}4)-0=5\\[2pt]
+3 & \texttt{4uu4x2}   & (3{+}3{+}1)-2=5\\
+3 & \texttt{4u4u3}    & (3{+}3{+}2)-3=5\\
+3 & \texttt{3u4x3}\;? & (2{+}3{+}2)-2=5\ \Rightarrow \texttt{3u4u3}\\
+3 & \texttt{3u4x2}    & (2{+}3{+}1)-1=5\\
+3 & \texttt{4uu4u3?} & \text{(see overlap chains below)}\\
+3 & \texttt{3u3u4}    & (2{+}2{+}3)-2=5\\
+3 & \texttt{3x3x3}?   & (2{+}2{+}2)-1=5 \Rightarrow \texttt{3u3x3 / 3u3u3}\\
+3 & \texttt{3x3x2}    & (2{+}2{+}1)-0=5\\
+3 & \texttt{2x2x5}    & (1{+}1{+}4)-1=5 \Rightarrow \texttt{2x2u5}\\
+3 & \texttt{2x3x4}    & (1{+}2{+}3)-1=5 \Rightarrow \text{with one }u\\[2pt]
+4 & \texttt{3u3x2x2}  & (2{+}2{+}1{+}1)-1=5\\
+4 & \texttt{3x2x2x2}  & (2{+}1{+}1{+}1)-0=5\\
+4 & \texttt{3u3u3x2}  & (2{+}2{+}2{+}1)-2=5\\
+4 & \texttt{3u3u3u3?} & (2{+}2{+}2{+}2)-3=5\\[2pt]
+5 & \texttt{2x2x2x2x2}& (1{+}1{+}1{+}1{+}1)-0=5
+\end{array}
+\]
+The genuinely \emph{primitive} types --- those that actually produce new
+minimal reflexive $5$-polytopes (after discarding the entries above that
+either reduce to a lower-overlap type or fail the per-block IP requirement of
+Theorem~\ref{thm:cwsvalid}) --- are, organized by $r$:
+\begin{itemize}
+  \item $r=1$: \texttt{6} (a single length-$6$ WS, the simplicial case);
+  \item $r=2$: \texttt{2x5}, \texttt{3x4}, \texttt{3u5}, \texttt{4u4},
+        \texttt{4uu5}, \texttt{5uuu5};
+  \item $r=3$: \texttt{2x2u5}, \texttt{3x3x2}, \texttt{3u3u4},
+        \texttt{3u4x2}, \texttt{3u4u3}, \texttt{4uu4x2}, \texttt{4u4u3}
+        (and their admissible overlap variants);
+  \item $r=4$: \texttt{3x2x2x2}, \texttt{3u3x2x2}, \texttt{3u3u3x2};
+  \item $r=5$: \texttt{2x2x2x2x2}.
+\end{itemize}
+\end{theorem}
+
+\begin{remark}[How to read the $d=5$ table, and the role of PALP for $d>4$]
+\label{rmk:cws5}
+The table above is the $d=5$ analogue of the hard-coded $d=4$ list of
+Example~\ref{ex:cws4types}, but with a crucial software difference. PALP
+\emph{hard-codes} the $d\le 4$ types inside \texttt{Make\_34\_CWS} (which
+\texttt{assert(d <= 4)}); for $d=5$ this routine is \emph{not} used. Instead,
+\texttt{Init\_IP\_CWS} routes $d>4$ to the \emph{generic} driver
+\texttt{Make\_IP\_CWS}, which does \emph{not} carry a built-in type list:
+the user supplies the lower-dimensional weight files (one per block) and the
+desired type via the command line,
+\begin{verbatim}
+cws.x -c5 -n2 w4.dat w4.dat -t 1 1     # the 4u4 type (two length-4 WS, u=1)
+cws.x -c5 -n3 w3 w3 w4 -t u1 u2 u3     # an r=3 type with per-block overlaps
+\end{verbatim}
+The overlap parameters $u$ of Definition~\ref{def:cwstype} become the
+\texttt{-t} arguments (\texttt{t.u[0],\dots,t.u[nF-1]}, validated against
+$\sum_j D_j - u_{\mathrm{tot}} = d$ in the \texttt{nF==2}/\texttt{nF==3}
+branches of \texttt{Make\_IP\_CWS}, exactly~\eqref{eq:cwsdimcount}), and
+\texttt{PrintCWSTypes} (option \texttt{-t} with no argument) prints the
+enumerable types. Thus the $d=5$ ``table'' is not a fixed array in the
+source --- it is the set of \texttt{-c5 -n\# \dots -t \dots} invocations one
+must \emph{loop over}, which is precisely the orchestration
+\texttt{refpoly-5d} performs around PALP. The single-WS row (type \texttt{6})
+is produced separately by \texttt{cws.x -w5 \dots} (Section~\ref{sec:algo-singleWS}).
+\end{remark}
+
+\begin{remark}[Caveat on the table entries]\label{rmk:cws5caveat}
+Several rows in Theorem~\ref{thm:cws5types} carry a ``\texttt{?}'' or a
+rewrite arrow: these record candidate $(r;\ell_j;u)$ tuples
+that \emph{satisfy the dimension count}~\eqref{eq:cwsdimcount} but must still
+be screened by Theorem~\ref{thm:cwsvalid}'s per-block IP condition and by the
+no-containment / minimality requirement (a block must not be absorbed into the
+span of the others, else the configuration is not a \emph{minimal} IP). After
+that screening, distinct overlap patterns that yield $GL(5,\mathbb{Z})$-iso\-mor\-phic
+$\nabla$ collapse under the normal form of
+Section~\ref{sec:algo-nf}. The arrows indicate the surviving canonical
+representative. The bulleted ``primitive types'' list is the cleaned-up
+result; it is the $d=5$ counterpart of the nine $d=4$ types of
+Example~\ref{ex:cws4types} (note $d=5$ has strictly more types, reflecting the
+combinatorial explosion that makes $d=5$ open).
+\end{remark}
+
+%--------------------------------------------------------------
+\subsection{Step P --- from a (C)WS to the polytope and its dual}
+\label{sec:algo-poly}
+%--------------------------------------------------------------
+
+\begin{remark}[\texttt{Make\_CWS\_Points} builds $\nabla$ and the lattice]
+\label{rmk:cwspoints}
+Given a filled \texttt{CWS}, \texttt{Make\_CWS\_Points(CW,P)}
+(\texttt{PALP/Coord.c}) produces the \texttt{PolyPointList} of the polytope.
+It (i) optionally permutes coordinates for a better basis
+(\texttt{CWS\_to\_PermCWS}); (ii) builds a triangular lattice basis with
+\texttt{Make\_CWS\_Basis}, reducing the $\mathcal N$ redundant coordinates to
+$d = \mathcal N - \texttt{nw}$ genuine ones via the linear relations
+$\sum_j \texttt{W[i][j]}\,X_j = \texttt{d[i]}$ (one per weight system); and
+(iii) scans the bounded lattice box
+$\texttt{xmin}[j]\le x_j\le \texttt{xmax}[j]$ derived from
+$\texttt{Xmax}[i]=\min_j \texttt{d[i]}/\texttt{W[i][j]}$, emitting every
+lattice point satisfying the degree constraints. The reference point
+\texttt{X0} (all-ones when \texttt{index}$=1$) is mapped to the origin of the
+$x$-lattice, realizing ``$0$ interior'' concretely.
+\end{remark}
+
+\begin{remark}[Reflexivity and dual: \texttt{IP\_Check} +
+\texttt{Make\_Dual\_Poly}]\label{rmk:dual-code}
+The function \texttt{PRINT\_CWS} (\texttt{cws.c}, active when compiled with
+\texttt{Only\_IP\_CWS}) ties it together: after
+\texttt{Make\_CWS\_Points} it calls \texttt{IP\_Check(P,\&V,\&E)} to verify
+$0$ is interior and to get facets \texttt{E}; tests reflexivity by the same
+\texttt{E.e[i].c == 1} criterion of Remark~\ref{rmk:ipref-code}; computes the
+polar dual $\Delta = \nabla^*$ with \texttt{Make\_Dual\_Poly(P,\&V,\&E,DP)}
+(this is Section~\ref{sec:dual}'s max/min duality made executable); and
+prints the signature
+\begin{verbatim}
+M:<#points> <#vertices>   N:<#dual points> <#dual vertices>
+\end{verbatim}
+that is the canonical KS one-line descriptor (e.g.\ the quintic prints
+\texttt{5 1 1 1 1 1 M:126 5 N:6 5 H:1,101 [-200]}, see \texttt{Print\_CWH}
+in \texttt{Global.h}). The assertion \texttt{IP\_Check(DP,...)} confirms
+duality preserves the IP property.
+\end{remark}
+
+%--------------------------------------------------------------
+\subsection{Step N --- normal form and deduplication}
+\label{sec:algo-nf}
+%--------------------------------------------------------------
+
+Distinct (C)WS frequently yield $GL(d,\mathbb{Z})$-isomorphic polytopes, and
+the same maximal polytope is reached from many minimal seeds. The final step
+is a canonical normal form (PALP NF) used as a hash key.
+
+\begin{remark}[\texttt{Make\_Poly\_NF} and the triangular GLZ normal form]
+\label{rmk:nf-code}
+The entry point is \texttt{Make\_Poly\_NF(P,\&V,\&F,pNF)}
+(\texttt{PALP/Polynf.c}), returning $1$ iff reflexive and writing the
+canonical vertex matrix \texttt{pNF}. Its engine is
+\texttt{GLZ\_Make\_Trian\_NF}, which puts the vertex matrix into an upper-
+triangular Hermite-like form under $GL(d,\mathbb{Z})$ using the constructive
+unimodular completion \texttt{GL\_W\_to\_GLZ} (build a $GL(d,\mathbb{Z})$
+matrix whose first row is a given primitive vector, via iterated extended
+gcd \texttt{GL\_Egcd}). To resolve the residual permutation ambiguity of the
+vertices, \texttt{Make\_Poly\_Sym\_NF} (declared in \texttt{Global.h})
+computes the symmetry group of the vertex--facet pairing matrix
+(\texttt{Make\_VPM\_NF}, \texttt{Aux\_pNF\_from\_vNF}) and selects the
+lexicographically minimal labelling. The output \texttt{pNF} is a true
+$GL(d,\mathbb{Z})$ invariant: two polytopes are isomorphic iff their
+\texttt{pNF} matrices coincide.
+\end{remark}
+
+\begin{remark}[Subpolytopes and dedup: \texttt{class.x}]\label{rmk:class-code}
+\texttt{class.c} (\texttt{Subpoly.c}, \texttt{Subdb.c}, \texttt{Subpoly.h})
+implements steps (S) and (5) of the pipeline: from a maximal $\Delta$ it
+enumerates reflexive subpolytopes (Section~\ref{sec:sub}), computing each
+one's \texttt{Make\_Poly\_NF} and inserting it into an \texttt{NF\_List} (a
+hash/database of normal forms; the binary database format is handled in
+\texttt{Subdb.c}). Insertion is idempotent, so duplicates produced by
+overlapping families collapse automatically. This is the deduplication that
+yields the final counts of Theorem~\ref{thm:ks}.
+\end{remark}
+
+%--------------------------------------------------------------
+\subsection{The full pipeline, step by step, with code map}
+\label{sec:algo-pipeline}
+%--------------------------------------------------------------
+
+Combining the above, here is the end-to-end algorithm with each step mapped
+to its PALP source. (Compare the high-level version in
+Section~\ref{sec:weights}.)
+
+\begin{enumerate}
+  \item[\textbf{(W1)}] \textbf{Enumerate single IP weight systems} of length
+        $d{+}1$ within the bounds of Proposition~\ref{prop:wbounds}.
+        \emph{Code:} \texttt{MakeIpWeights} $\to$ \texttt{Rec\_IpWeights}
+        ($w_i\le \mathfrak d/(N{-}i{+}1)$, sorted, $\gcd=1$); IP/reflexive
+        filter \texttt{IfIpWWrite} $\to$ \texttt{IP\_Check}, facet test
+        \texttt{E.e[i].c==1}. Invoked as \texttt{cws.x -w<d>}.
+  \item[\textbf{(W2)}] \textbf{Form combined weight systems} of all valid
+        combinatorial types (Theorem~\ref{thm:cwsvalid}). \emph{Code:}
+        \texttt{Make\_IP\_CWS} (and \texttt{Make\_nno\_CWS}) selecting blocks
+        with \texttt{Select\_n\_of\_W}/\texttt{next\_n} and embedding them via
+        \texttt{W\_TO\_CWS}/\texttt{RW\_TO\_CWS} (overlap $u$, paddings
+        $\texttt{Nf},\texttt{Nr},\texttt{Nb}$), assembling the \texttt{CWS}
+        struct of Remark~\ref{rmk:cwsstruct}. Invoked as
+        \texttt{cws.x -c<d> -n<\#files> file1 \dots} for $d>4$.
+  \item[\textbf{(P)}] \textbf{Build the minimal polytope and dualize.}
+        \emph{Code:} \texttt{Make\_CWS\_Points} (Coord.c) $\to$
+        \texttt{IP\_Check} $\to$ reflexivity test $\to$
+        \texttt{Make\_Dual\_Poly} to obtain the maximal
+        $\Delta = \nabla^*$ (Section~\ref{sec:dual}). Orchestrated by
+        \texttt{PRINT\_CWS}.
+  \item[\textbf{(S)}] \textbf{Enumerate reflexive subpolytopes} of each
+        maximal $\Delta$ (Theorem~\ref{thm:embed}). \emph{Code:}
+        \texttt{class.c} with \texttt{Subpoly.c}.
+  \item[\textbf{(N)}] \textbf{Normal-form and deduplicate.} \emph{Code:}
+        \texttt{Make\_Poly\_NF} / \texttt{GLZ\_Make\_Trian\_NF} /
+        \texttt{Make\_Poly\_Sym\_NF} (Polynf.c) feeding an \texttt{NF\_List}
+        (Subpoly.c/Subdb.c). Invoked as \texttt{poly.x -N} (single NF) or
+        \texttt{class.x} (batch with dedup).
+\end{enumerate}
+
+\begin{remark}[Where \texttt{refpoly-5d} plugs in]\label{rmk:refpoly5d-algo}
+For $d=5$ the project ingests precomputed weight systems (the
+Scholler--Skarke list), so steps (W1)--(W2) are supplied as input; the
+project drives PALP compiled at $\texttt{POLY\_Dmax}=5$ through steps
+(P) and (N) --- \texttt{Make\_CWS\_Points}, reflexivity, and the
+$GL(5,\mathbb{Z})$ normal form \texttt{Make\_Poly\_NF} --- and deduplicates
+the resulting \texttt{pNF} keys at scale by external sort--merge rather than
+the in-core \texttt{NF\_List}. The constants of Remark~\ref{rmk:constants}
+($\texttt{AMBI\_Dmax}=30$, $\texttt{W\_Nmax}=6$) are already adequate for
+$d=5$ CWS.
+\end{remark}
+
+%--------------------------------------------------------------
+\subsection{Three full code-flow traces}
+\label{sec:algo-traces}
+%--------------------------------------------------------------
+
+We now trace the actual PALP call graph, function by function and file by
+file, for three concrete jobs. The shared entry point is
+\texttt{main(narg,fn)} in \texttt{cws.c} (lines around the
+\texttt{fn[1][1]} dispatch): it reads \texttt{stdin}/\texttt{stdout}, then
+branches on the option letter --- \texttt{'w'}$\to$\texttt{Init\_IP\_Weights},
+\texttt{'c'}$\to$\texttt{Init\_IP\_CWS}, \texttt{'d'}$\to$\texttt{RgcWeights},
+etc. In all traces, ``reflexivity'' is the test \texttt{E.e[i].c==1} for every
+facet (Remark~\ref{rmk:ipref-code}), and ``$0$ interior'' is
+\texttt{IP\_Check} (\texttt{Vertex.c}). PALP is compiled with
+\texttt{POLY\_Dmax} $\ge d$ (Remark~\ref{rmk:constants}); the \emph{only}
+dimension input at run time is the integer after \texttt{-w}/\texttt{-c}.
+
+\subsubsection*{(a) $d=5$, single weight system: \texttt{cws.x -w5 1 H -r}}
+
+\begin{enumerate}
+  \item \texttt{main} sees \texttt{fn[1]="-w5"} $\Rightarrow$
+        \texttt{Init\_IP\_Weights(narg,fn)} (\texttt{cws.c}).
+  \item \texttt{Init\_IP\_Weights} parses $d=\texttt{atoi("5")}=5$, checks
+        \texttt{POLY\_Dmax}$\ge 5$, reads the degree window $L\,H$ and the
+        \texttt{-r} flag ($\texttt{rf}=1$, report only reflexive). Because a
+        degree window is present ($H>0$) it calls
+        \texttt{Make\_IP\_Weights(5,L,H,1,0)}. \emph{(Without $L\,H$ it would
+        call \texttt{Make\_34\_Weights}, which \texttt{assert(d<=4)} and so
+        \emph{cannot} run in $d=5$ --- this is a genuine $d=4$ vs $d=5$ fork.)}
+  \item \texttt{Make\_IP\_Weights} calls
+        \texttt{MakeIpWeights(N=d+1=6,L,H,\&rf,\&tf)}.
+  \item \texttt{MakeIpWeights} allocates a \texttt{PolyPointList}, sets
+        \texttt{W.N=6}, and runs the two finiteness loops of
+        Remark~\ref{rmk:boundmatch}: outer over \texttt{W.d}$\in[L,H]$, inner
+        over the largest weight \texttt{W.w[5]} from $\mathfrak d/2$ down to
+        $\mathfrak d/6$, each seeding
+        \texttt{Rec\_IpWeights(\&W,P,\dots,n=N-2=4,\dots)}.
+  \item \texttt{Rec\_IpWeights} fills $w_4,w_3,\dots,w_0$ with the caps
+        \texttt{wmax = W->d/(W->N-n+1)}, $\le w_{n+1}$, $\le$\texttt{sum-n};
+        at the leaf ($n=0$) sets $w_0=\texttt{sum}$ and, if
+        \texttt{Fgcd(g,w0)==1}, calls \texttt{IfIpWWrite(\&W,P,\dots)}.
+  \item \texttt{IfIpWWrite} populates the simplex lattice points via
+        \texttt{Make\_Poly\_Points(W,P)}, calls
+        \texttt{IP\_Check(P,\&V,\&E)} (\texttt{Vertex.c}) to confirm $0$
+        interior (Lemma~\ref{lem:ipcrit}) and obtain facets \texttt{E}, then
+        sets \texttt{r} via the \texttt{E.e[i].c==1} reflexivity test. With
+        \texttt{rf=1} it prints the weight (\texttt{Write\_Weight}) iff
+        reflexive.
+\end{enumerate}
+\emph{Data populated:} a \texttt{Weight W} (the length-$6$ system),
+a \texttt{PolyPointList P} (the simplex points), \texttt{VertexNumList V},
+\texttt{EqList E} (facets). \emph{Where checks happen:} IP in
+\texttt{IP\_Check}; reflexivity in the \texttt{E.e[i].c} loop. \emph{No
+normal-form dedup here} --- single-WS output is a stream of weight tuples; the
+maximal-polytope/dual and \texttt{pNF} steps come from the \texttt{-c}/\,NF
+paths. This is the type-\texttt{6} row of Theorem~\ref{thm:cws5types}.
+
+\subsubsection*{(b) $d=4$, single weight system: \texttt{cws.x -w4} or \texttt{-w4 1 H}}
+
+\begin{enumerate}
+  \item \texttt{main} $\to$ \texttt{Init\_IP\_Weights}, $d=4$.
+  \item \emph{Fork on whether a degree window is given:}
+  \begin{itemize}
+    \item \emph{With} $L\,H$: \texttt{Make\_IP\_Weights(4,L,H,\dots)} $\to$
+          \texttt{MakeIpWeights(N=5,\dots)} $\to$ \texttt{Rec\_IpWeights}
+          (identical machinery to trace (a) but $N=5$, length-$5$ systems,
+          slot cap $\mathfrak d/(5-i+1)$, largest weight loop from
+          $\mathfrak d/2$ to $\mathfrak d/5$).
+    \item \emph{Without} $L\,H$: \texttt{Make\_34\_Weights(4,tf)}
+          (\texttt{cws.c}, \texttt{assert(d<=4)}). This is the
+          \emph{point-set} constructor: it allocates a \texttt{WSaux X},
+          sets \texttt{X->N=d+1=5}, builds the candidate interior/boundary
+          point patterns via \texttt{makesubsets} and the
+          \texttt{X->points[1][\dots]} seeds $((4,0,..),(3,1,..),(2,2,..),\dots)$,
+          and calls \texttt{createweights(X,\dots)} for each --- the
+          constructive enumeration dual to the partition recursion. Each
+          surviving system is screened by the same IP/reflexivity test.
+  \end{itemize}
+  \item In both forks the per-candidate kernel is \texttt{Make\_Poly\_Points}
+        $\to$ \texttt{IP\_Check} $\to$ \texttt{E.e[i].c==1}.
+\end{enumerate}
+\emph{$d=4$ vs $d=5$ difference:} only the length ($N{+}1=5$ vs $6$) and the
+\emph{availability} of the hard-coded point-set route \texttt{Make\_34\_Weights}
+($d\le 4$ only). In $d=5$ one \emph{must} supply a degree window (or use the
+\texttt{-d}/Rgc route of Remark~\ref{rmk:rgc}); in $d=4$ both routes exist.
+
+\subsubsection*{(c) $d=4$, ALL combined weight systems: \texttt{cws.x -c4}}
+
+\begin{enumerate}
+  \item \texttt{main} sees \texttt{-c4} $\Rightarrow$
+        \texttt{Init\_IP\_CWS(narg,fn)}.
+  \item \texttt{Init\_IP\_CWS} parses $d=4$. No \texttt{-n} flag is given and
+        $d\le 4$, so it calls \texttt{Make\_34\_CWS(4)}. \emph{(For $d>4$, or
+        with \texttt{-n}, it would call the generic
+        \texttt{Make\_IP\_CWS} instead --- the $d=4$ vs $d=5$ fork for CWS.)}
+  \item \texttt{Make\_34\_CWS(4)} (\texttt{assert(d<=4)}) opens three temp
+        files \texttt{w2FILE,w3FILE,w4FILE} and fills them with all length-$2$,
+        $3$, $4$ IP weight systems via \texttt{STtmp} (internally the same
+        \texttt{Make\_34\_Weights} machinery). It then walks the
+        \emph{hard-coded} $d=4$ type list of Example~\ref{ex:cws4types},
+        issuing one constructor call per type with the right overlap $u$ and
+        ``equal-files'' flag \texttt{ef}:
+        \begin{verbatim}
+mkold2(w4,w4,u=2,ef=1);  /* 4uu4 */   mkold2(w3,w4,u=1,ef=0);  /* 3u4  */
+mkold2(w3,w3,u=0,ef=1);  /* 3x3  */   mkold2(w2,w4,u=0,ef=0);  /* 2x4  */
+mkold_nno(w3,w3,w2,u=1,ef=1); /*3u3x2*/ mkold_nno(w3,w2,w2,u=0,ef=0);/*3x2x2*/
+mk3u3u3(w3);             /* 3u3u3 */  mk2xxx(4);               /* 2x2x2x2 */
+        \end{verbatim}
+  \item Each \texttt{mkold2}/\texttt{mkold\_nno} reads its weight file(s),
+        selects sub-blocks with \texttt{Select\_n\_of\_W}/\texttt{next\_n}
+        (Remark~\ref{rmk:select}), and emits the embedded \texttt{CWS} via
+        \texttt{W\_TO\_CWS}/\texttt{RW\_TO\_CWS} with the paddings
+        $(\texttt{Nf},\texttt{Nr},\texttt{Nb},u)$ (Remark~\ref{rmk:wtocws}).
+  \item For each assembled \texttt{CWS} it calls \texttt{PRINT\_CWS(\&CW)}
+        (\texttt{cws.c}): \texttt{CW->index=1} $\to$
+        \texttt{Make\_CWS\_Points(CW,P)} (\texttt{Coord.c}, builds $\nabla$ and
+        reduces the $\mathcal N$ ambient coords to $d=4$ genuine ones) $\to$
+        \texttt{IP\_Check(P,\&V,\&E)} $\to$ reflexivity \texttt{E.e[i].c==1}
+        $\to$ \texttt{Make\_Dual\_Poly(P,\&V,\&E,DP)} (\texttt{Vertex.c}, the
+        max/min dualization of Section~\ref{sec:dual}) $\to$ prints
+        \texttt{M:\#pts \#verts N:\#dualpts \#dualverts}, and
+        \texttt{assert(IP\_Check(DP,\dots))}.
+\end{enumerate}
+\emph{Data populated:} \texttt{CWS CW} (the embedded combined system),
+\texttt{PolyPointList P} ($\nabla$) and \texttt{DP} ($\Delta=\nabla^*$),
+\texttt{V},\texttt{E}. \emph{Where checks happen:} IP and reflexivity in
+\texttt{PRINT\_CWS}; the dual in \texttt{Make\_Dual\_Poly}.
+\emph{Dedup:} \texttt{cws.x -c} streams one line per CWS \emph{without}
+internal NF dedup --- the $GL(d,\mathbb{Z})$ normal form and removal of
+duplicates is the downstream job of \texttt{poly.x -N} /
+\texttt{class.x} (Remarks~\ref{rmk:nf-code},~\ref{rmk:class-code}), fed this
+stream.
+
+\paragraph{The $d=4$ vs $d=5$ summary.} Two forks distinguish the dimensions,
+both inside \texttt{cws.c}:
+\begin{enumerate}
+  \item \emph{Single WS:} the point-set constructor \texttt{Make\_34\_Weights}
+        is \texttt{assert(d<=4)}, so $d=5$ must take the partition recursion
+        \texttt{Make\_IP\_Weights}$\to$\texttt{Rec\_IpWeights} (degree window
+        required), or the \texttt{-d} Rgc route.
+  \item \emph{CWS:} the hard-coded type list \texttt{Make\_34\_CWS} is
+        \texttt{assert(d<=4)}; $d=5$ is dispatched (via \texttt{Init\_IP\_CWS})
+        to the generic \texttt{Make\_IP\_CWS}, which takes the type as
+        \texttt{-n\#} weight files plus \texttt{-t} overlap arguments rather
+        than from a built-in list (Remark~\ref{rmk:cws5}).
+\end{enumerate}
+Everything downstream of the assembled \texttt{CWS}/\texttt{Weight} ---
+\texttt{Make\_CWS\_Points}, \texttt{IP\_Check}, reflexivity,
+\texttt{Make\_Dual\_Poly}, \texttt{Make\_Poly\_NF} --- is dimension-generic,
+governed only by the compile-time \texttt{POLY\_Dmax} of
+Remark~\ref{rmk:constants}.
+
+%--------------------------------------------------------------
+\subsection{Maximum degree for $d=5$ and complete call graph}
+\label{sec:algo-maxdeg}
+%--------------------------------------------------------------
+
+The traces of Section~\ref{sec:algo-traces} leave one quantitative gap: the
+single-WS driver \texttt{cws.x -w5 1 H -r} requires a concrete upper degree
+$H$ to bound the outer loop. We now fix that constant exactly, following the
+analysis of Sch\"oller--Skarke (arXiv:1808.02422), and then give the complete
+function-by-function call graph for the $d=5$ single-WS reflexive enumeration.
+
+\subsubsection*{The extremal degree $\mathfrak{d}_{\max}$}
+
+\begin{theorem}[Maximum degree of a $d=5$ single weight system;
+arXiv:1808.02422]\label{thm:maxdeg5}
+Among all length-$6$ IP weight systems (the $r=1$, simplicial case of
+Theorem~\ref{thm:cws5types}, type \texttt{6}), the maximal degree is
+\begin{equation}\label{eq:maxdeg5}
+  \mathfrak{d}_{\max}
+  \;=\; 3\,263\,442
+  \;=\; 2 \times 3 \times 7 \times 43 \times 1807
+  \;=\; 1806 \times 1807 ,
+\end{equation}
+the product of the first five Sylvester numbers $a_1 a_2 a_3 a_4 a_5$. It is
+attained by the extremal weight system with rational weights
+\begin{equation}\label{eq:maxws5}
+  q^{(6)}_{ct}
+  = \Bigl(\tfrac12,\ \tfrac13,\ \tfrac17,\ \tfrac1{43},\
+          \tfrac1{1807},\ \tfrac1{3263442}\Bigr),
+\end{equation}
+equivalently the coprime integer weights
+\begin{equation}\label{eq:maxws5int}
+  (w_0,\dots,w_5)
+  = (1631721,\ 1087814,\ 466206,\ 75894,\ 1806,\ 1),
+  \qquad \sum_i w_i = \mathfrak{d}_{\max}.
+\end{equation}
+This weight system is reflexive: it is the ``central upper tip'' of the
+$(h^{1,1},h^{1,3})$ Hodge plot (arXiv:1808.02422, Fig.~1).
+\end{theorem}
+
+\begin{remark}[Why this is the true maximum, not just a large example]
+\label{rmk:maxdeg5}
+The Sylvester numbers are $a_1=2$, $a_{k+1}=a_1\cdots a_k+1$, giving
+$2,3,7,43,1807,\dots$ The weights~\eqref{eq:maxws5} are the greedy
+``unit-fraction'' expansion $\sum_i q_i = 1$ with each $q_i$ taken as large as
+possible while leaving the remainder a unit fraction --- the
+$d{+}1=6$-term Sylvester expansion of $1$. This greedy construction maximizes
+the common denominator at every step, so its denominator
+$a_1\cdots a_5 = 1806\times 1807$ is the largest achievable degree: any other
+length-$6$ IP weight system corresponds to a different (non-greedy) branch of
+the recursive partition tree of \texttt{Rec\_IpWeights}, and no such branch can
+exceed the Sylvester product. Hence~\eqref{eq:maxdeg5} is the exact ceiling
+$\mathfrak{d}_{\max}(5)$ of the degree window of
+Proposition~\ref{prop:wsfinite} and Remark~\ref{rmk:boundmatch}: setting
+\texttt{cws.x -w5 1 3263442 -r} makes the enumeration of all reflexive $d=5$
+single weight systems \emph{exhaustive}.
+\end{remark}
+
+\subsubsection*{The complete PALP call chain for \texttt{cws.x -w5 1 3263442 -r}}
+
+With $H=\mathfrak{d}_{\max}$ fixed, the full call graph of the single-WS
+reflexive enumeration is the following (file of each routine in brackets;
+this expands trace~(a) of Section~\ref{sec:algo-traces} to leaf level):
+
+\begin{verbatim}
+main(narg, fn)                              [cws.c]
+  fn[1][1] == 'w'  ->
+  Init_IP_Weights(narg, fn)                 [cws.c]
+    d=5, L=1, H=3263442, rf=1
+    H>0  ->
+    Make_IP_Weights(5, 1, 3263442, 1, 0)   [cws.c]
+      MakeIpWeights(N=6, 1, 3263442, &rf, &tf)  [cws.c]
+        allocate PolyPointList *P
+        outer: W.d in [1, 3263442]
+          inner: W.w[5] from W.d/2 down while W.d <= 6*W.w[5]
+            Rec_IpWeights(&W, P, gcd(W.d,W.w[5]), W.d-W.w[5], n=4, ...)
+              wmax = W->d/(W->N-n+1)          // = d/(6-n+1)
+              wmax = min(wmax, W->w[n+1])      // keep sorted
+              wmax = min(wmax, sum-n)           // leave >=1 per slot
+              if n>0: recurse with n-1
+              if n==0 and gcd(g,sum)==1:
+                IfIpWWrite(&W, P, &rf, &tf)
+                  Make_Poly_Points(W, P)        [Vertex.c]
+                  IP_Check(P, &V, &E)           [Vertex.c]
+                    returns 0 if not IP
+                  for i: if E.e[i].c != 1: r=0  // reflexivity
+                  if rf&&r: Write_Weight(&W) -> stdout; nrp++
+        fprintf("#primepartitions=%d #refpolys=%d\n", npp, nrp)
+\end{verbatim}
+
+\begin{remark}[Reading the call graph against the theory]\label{rmk:callgraph5}
+Every layer of this graph is one of the structural results above made
+executable. The \texttt{outer}/\texttt{inner} loops in \texttt{MakeIpWeights}
+are the two finiteness mechanisms of Proposition~\ref{prop:wsfinite} (degree
+window $=$ part (b), seeded at $\mathfrak{d}/2$; the recursion $=$ part (a)),
+exactly as in Remark~\ref{rmk:boundmatch}. The three \texttt{wmax} caps in
+\texttt{Rec\_IpWeights} are the per-slot bound $\mathfrak{d}/(N-i+1)$, the
+sorted ordering, and the leave-one-per-slot rule of
+Proposition~\ref{prop:wbounds}. The leaf-level \texttt{gcd(g,sum)==1} is the
+coprimality of Definition~\ref{def:weights}; \texttt{IP\_Check} verifies the
+interior-point criterion of Lemma~\ref{lem:ipcrit}; and the test
+``\texttt{E.e[i].c != 1}'' is the reflexivity criterion of
+Remark~\ref{rmk:ipref-code}. The terminating \texttt{\#refpolys} count is the
+number of reflexive type-\texttt{6} systems; the extremal one of
+Theorem~\ref{thm:maxdeg5} is the last to survive at the top of the degree
+window.
+\end{remark}
+
+%==============================================================
+\section{The fibre of the map $\mathrm{WS}\to\mathrm{NF}$: how, and how
+badly, weight data is lost}\label{sec:fibre}
+%==============================================================
+
+Section~\ref{sec:algo-nf} built the normal form $\mathrm{NF}(\Delta)$ as the
+hash key that deduplicates the classification. This section studies the
+\emph{fibres} of the resulting many-to-one map
+\begin{equation}\label{eq:wsnfmap}
+  \Phi:\ q \ \longmapsto\ \mathrm{NF}(\Delta_q),
+  \qquad
+  q=(w_0,\dots,w_d)\ \text{a reflexive (single) weight system},
+\end{equation}
+i.e.\ which weight systems collapse to the same polytope, why information is
+destroyed, and how much of the collapse is predictable from the weight data
+alone. This is the structural question behind the \texttt{refpoly-5d} dedup.
+
+\begin{remark}[The dataset, stated precisely]\label{rmk:datasetnumbers}
+The weight systems here are \emph{not} generic IP weight systems but the
+Sch\"oller--Skarke list (arXiv:1808.02422): the single weight systems
+$q=(w_0,\dots,w_5)$ whose Newton polytope $\Delta_q$ is a \emph{maximal}
+reflexive $5$-polytope --- equivalently (Section~\ref{sec:dual}) those whose
+weighted-projective ambient $\mathbb P^5_{(w_0,\dots,w_5)}$ is Gorenstein-Fano
+and whose dual simplex is \emph{minimal}, so that $\Delta_q$ admits no strictly
+larger reflexive superpolytope on its lattice. ``Maximal'' is the polar-dual of
+``minimal'' (Theorem~\ref{thm:maxmin}); Sch\"oller--Skarke generate exactly the
+maximal seeds by the bounded weight-recursion of Section~\ref{sec:algo-singleWS}
+(\texttt{cws.x -w5}) and filter on the reflexivity test $\texttt{E.e[i].c}=1$.
+There are
+\begin{equation}\label{eq:ssnumbers}
+  322\,383\,760\,930 \ \text{IP},
+  \qquad
+  185\,269\,499\,015 \ \text{reflexive}
+\end{equation}
+such single weight systems in $d=5$ (companion note \S5.2). Two count caveats
+that govern every fibre estimate below:
+\begin{itemize}
+  \item the reflexive single weight systems map onto $\approx 2.3\times 10^{9}$
+        \emph{distinct} normal forms (unique reflexive $5$-polytopes arising as
+        maximal Newton polytopes of single weight systems);
+  \item the figure $\approx 8.8\times 10^{7}$ that appears in earlier drafts is
+        \emph{not} the total --- it is the size of the \emph{sample} for which
+        \texttt{refpoly-5d} currently holds the complete $\mathrm{WS}\to
+        \mathrm{NF}$ map. Any average-fibre number computed against it is a
+        property of the sample, not of the whole.
+\end{itemize}
+\end{remark}
+
+\subsection{Three polytopes attached to one weight system}
+\label{sec:fibre-three}
+
+Everything below depends on keeping three objects strictly apart (compare the
+companion note \texttt{ws\_vs\_cws\_pipelines.md}, \S1.3).
+
+\begin{definition}[The minimal core, the Newton polytope, the normal form]
+\label{def:threepoly}
+For a single IP weight system $q=(w_0,\dots,w_d)$ of degree
+$\mathfrak d=\sum_i w_i$:
+\begin{enumerate}
+  \item the \emph{minimal core} $\nabla_q\subset N_{\mathbb R}$ is the
+        $d$-simplex on the ray generators $v_0,\dots,v_d$ obeying the circuit
+        relation $\sum_i w_i v_i=0$ (Definition~\ref{def:weights},
+        Lemma~\ref{lem:ipcrit}); it has exactly $d{+}1$ vertices;
+  \item the \emph{Newton polytope}
+        $\Delta_q=\operatorname{conv}\bigl(\mathbb Z^{n}\cap\{y\in W_q:\,
+        y_i\ge -1\}\bigr)$, $W_q=\{y:\sum_i w_i y_i=0\}$, is the convex hull of
+        \emph{all} degree-$\mathfrak d$ monomials of
+        $\mathbb P^{d}_{(w_0,\dots,w_d)}$; it generically has \emph{many}
+        vertices and is the polytope PALP actually reflexivity-tests and
+        normal-forms;
+  \item $\mathrm{NF}(\Delta_q)$ is the $GL(d,\mathbb Z)$ normal form of
+        Section~\ref{sec:algo-nf}, the canonical hash key.
+\end{enumerate}
+Thus $\Phi$ of~\eqref{eq:wsnfmap} factors as
+\begin{equation}\label{eq:phifactor}
+  q \;\xrightarrow{\ \alpha\ }\; \Delta_q \;\xrightarrow{\ \beta\ }\;
+  \mathrm{NF}(\Delta_q),
+  \qquad
+  \alpha=\text{``hull of all monomials''},\quad
+  \beta=\text{``quotient by }GL(d,\mathbb Z)\text{''}.
+\end{equation}
+\end{definition}
+
+\subsection{Q1 --- finiteness of the single-WS fibre}
+\label{sec:fibre-finite}
+
+\begin{theorem}[The single-WS fibre is finite]\label{thm:fibrefinite}
+For every reflexive normal form $P$, the fibre
+$\Phi^{-1}(P)=\{q:\mathrm{NF}(\Delta_q)=P\}$ is finite. Two logically distinct
+mechanisms force this:
+\begin{enumerate}
+  \item[\textnormal{(a)}] \emph{Global (metric) finiteness.} The set of
+        \emph{all} length-$(d{+}1)$ IP weight systems is already finite
+        (Proposition~\ref{prop:wsfinite}); in $d=5$ the degree is bounded by
+        $\mathfrak d_{\max}=3\,263\,442$ (Theorem~\ref{thm:maxdeg5}). A fibre is
+        a subset of a finite set.
+  \item[\textnormal{(b)}] \emph{Local (combinatorial) finiteness.} A fixed
+        polytope $P$ has finitely many lattice points, hence finitely many
+        $d$-simplices on its points; each such simplex carries
+        \emph{at most one} weight system (Lemma~\ref{lem:ipcrit}). So
+        \begin{equation}\label{eq:fibrebound}
+          \#\,\Phi^{-1}(P)\ \le\
+          \#\bigl\{\text{IP }d\text{-simplex circuits } \sigma \text{ of some }
+          P'\cong P\bigr\}\ <\ \infty .
+        \end{equation}
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}[Mechanism, and the key structural point]
+Argument (a) is immediate. For (b) the essential fact is that, on the
+\emph{simplicial core}, a weight system is an \emph{invariant of the simplex},
+not extra data: by Lemma~\ref{lem:ipcrit} the vertices of an IP $d$-simplex
+admit a unique-up-to-scale affine dependence $\sum_i w_i v_i=0$, and the
+cleared-denominator coprime coefficient vector $(w_0,\dots,w_d)$ \emph{is} $q$
+--- read off as the barycentric coordinates of the unique interior point. Hence
+\begin{equation}\label{eq:simplexws-bij}
+  \{\text{IP } d\text{-simplices}\}/GL(d,\mathbb Z)
+  \ \xrightarrow{\ \cong\ }\
+  \{\text{length-}(d{+}1)\text{ IP weight systems}\}/\mathfrak S_{d+1},
+\end{equation}
+a \emph{bijection}. The many-to-one-ness of $\Phi$ therefore does \emph{not}
+originate at the simplex; it originates one step later, in $\alpha$ (the hull)
+and $\beta$ (the $GL$-quotient). Counting simplices of $P$ bounds the fibre,
+giving~\eqref{eq:fibrebound}. $\square$
+\end{proof}
+
+\begin{remark}[Two finitenesses, kept apart]\label{rmk:twofinite}
+Per-fibre finiteness~(b) is combinatorial and unconditional; global
+finiteness~(a) is metric and rests on the genuine Hensley/Sylvester degree
+bound (Theorem~\ref{thm:hensley}, Theorem~\ref{thm:maxdeg5}). The clean
+statement of Q1 is~\eqref{eq:fibrebound}: \emph{the fibre is bounded by the
+number of distinct IP-simplex circuits inside one normal-form polytope.}
+For the \emph{minimal} reflexive simplices (the duals $\nabla=\Delta^*$,
+Definition~\ref{def:min}) the bijection~\eqref{eq:simplexws-bij} makes the
+fibre essentially a singleton; the large fibres of $\Phi$ come from
+\emph{many minimal simplices feeding one maximal polytope}
+(Section~\ref{sec:fibre-loss}).
+\end{remark}
+
+\subsection{Q2 --- where the data is lost}\label{sec:fibre-loss}
+
+\begin{proposition}[Both arrows of~\eqref{eq:phifactor} are lossy, for
+different reasons]\label{prop:lossy}
+In the factorization $q\xrightarrow{\alpha}\Delta_q\xrightarrow{\beta}
+\mathrm{NF}$:
+\begin{enumerate}
+  \item $\alpha$ is injective on the simplicial core
+        (\eqref{eq:simplexws-bij}) but \emph{not} on the Newton polytope:
+        $\Delta_q$ is the \emph{convex hull} of all degree-$\mathfrak d$
+        monomials, and the hull is a lossy non-linear operation --- it discards
+        every non-vertex lattice point and can \emph{merge} the contributions
+        of different weight systems, so distinct $q$ can yield
+        $GL$-equal $\Delta_q$ (the toric analogue of ``different polynomials,
+        same Newton polytope'');
+  \item $\beta$ quotients by the \emph{non-local} group $GL(d,\mathbb Z)$:
+        whether two lattice polytopes are equivalent is not a function of any
+        local/arithmetic feature of the weights --- the normal form of
+        Section~\ref{sec:algo-nf} is precisely a \emph{certificate} of
+        equivalence, and there is no weight-local shortcut to it.
+\end{enumerate}
+\end{proposition}
+
+\begin{remark}[The deep reason: many minimal seeds, one maximal polytope]
+\label{rmk:manyseeds}
+The structural source of the collapse is the KS flow
+$\nabla\ (\text{minimal})\to\Delta=\nabla^*\ (\text{maximal})\to
+\{\text{subpolytopes}\}$ of Sections~\ref{sec:sub}--\ref{sec:dual}. A
+\emph{single} maximal reflexive polytope $\Delta$ typically contains
+\emph{several inequivalent} IP sub-simplices, i.e.\ several distinct weight
+systems, all of which flow to the same $\Delta$ and hence the same
+$\mathrm{NF}$ (and the same Calabi--Yau). This is exactly why insertion into the
+\texttt{NF\_List} is idempotent (Remark~\ref{rmk:class-code}). Predicting the
+fibre in advance therefore means \emph{predicting that two IP circuits of a
+polytope one has not yet built lie in the same $GL(d,\mathbb Z)$-orbit} --- which
+is the very decision the normal form exists to make. This is the precise sense
+in which Q2's ``you cannot tell without computing the polytope'' is correct.
+\end{remark}
+
+\begin{remark}[Quantitative loss in $d=5$, reconciled]\label{rmk:fibrequant}
+With the corrected counts of Remark~\ref{rmk:datasetnumbers}, the
+$\sim$$1.85\times 10^{11}$ reflexive single weight systems collapse to
+$\approx 2.3\times 10^{9}$ distinct normal forms, so the \emph{average} fibre of
+$\Phi$ over the \emph{full} Sch\"oller--Skarke list is
+\begin{equation}\label{eq:avgfibre}
+  \overline{\#\Phi^{-1}}\ \approx\ \frac{1.85\times 10^{11}}{2.3\times 10^{9}}
+  \ \approx\ 80 ,
+\end{equation}
+not the $\sim$$2100$ of earlier drafts. The earlier figure divided by the
+\emph{sample} normal-form count $8.8\times 10^{7}$ rather than the global
+$2.3\times 10^{9}$, and so overstated the collapse by $\sim$$26\times$; it is a
+statistic of the sample, not of the classification. \emph{Known vs.\
+extrapolated}: the numerator~\eqref{eq:ssnumbers} is a hard Sch\"oller--Skarke
+count; the denominator $2.3\times 10^{9}$ is the reported global normal-form
+total, of which $8.8\times 10^{7}$ is the portion with a fully materialized
+$\mathrm{WS}\to\mathrm{NF}$ map. The honest reading of~\eqref{eq:avgfibre} is
+``order $10^{1}$--$10^{2}$ weight systems per polytope on average,'' with the
+distribution heavily skewed (most polytopes have small fibres, a few maximal /
+high-symmetry ones have very large ones). That spread --- not the mean --- is
+the lost data, invisible until one runs $\alpha$ then $\beta$.
+\end{remark}
+
+\subsection{Q3 --- non-trivial predictors of the fibre from WS data alone}
+\label{sec:fibre-predict}
+
+No weight-local computation decides the \emph{general} fibre
+(Proposition~\ref{prop:lossy}\,(2)), but several genuine partial predictors
+exist, ordered cheap-to-deep.
+
+\begin{enumerate}
+  \item \textbf{Necessary invariants --- but one must split ``WS-local'' from
+        ``polytope-level'' (a correction).} It is tempting, and was asserted in
+        an earlier draft, that two WS in one fibre must agree on the degree
+        $\mathfrak d$ and the weight multiset $\{w_i\}$. \emph{This is false},
+        and the materialized $d=5$ map disproves it directly
+        (Remark~\ref{rmk:fibredata}): degree and multiset are invariants of the
+        \emph{simplicial core} $\nabla_q$, \emph{not} of the Newton-polytope
+        normal form, because the hull $\alpha$ merges weight systems of
+        \emph{different} degree and \emph{different} weights. The quantities that
+        \emph{are} provably constant on a fibre fall into two tiers:
+        \begin{itemize}
+          \item \emph{WS-local (hull-free), provably fibre-constant}: the count
+                of distinct weights $\#\{w_i\}$, the multiplicity profile of the
+                multiset, whether any $w_i=1$ and how many, and the Gorenstein
+                flag $w_i\mid\mathfrak d$ (Theorem~\ref{thm:reflexweight}).
+                These cost nothing but are very coarse (Section~\ref{sec:fibre-sieve}).
+          \item \emph{Polytope-level (require $\alpha$)}: the monomial count
+                $\ell(\Delta_q)$, the Batyrev Hodge numbers
+                $h^{1,1},h^{1,d-1}$, the Euler characteristic, and the
+                signature $M{:}np\,nv\ N{:}np\,nv$ (Remark~\ref{rmk:dual-code}).
+                These are strong (almost injective on normal forms,
+                Remark~\ref{rmk:fibredata}) but are \emph{downstream} of the
+                lossy hull, so they are not available in pure weight space.
+        \end{itemize}
+        \emph{No finite list of either tier is sufficient}: inequivalent
+        reflexive polytopes with identical Hodge data and point counts exist.
+  \item \textbf{Reflexive-simplex sub-class: fully predictable (Conrads).}
+        By~\eqref{eq:simplexws-bij}, $q$ determines $\nabla_q$ up to $GL$, and
+        simplex-equivalence is decided by a \emph{much cheaper} normal form than
+        the full $\Delta_q$ NF --- essentially the Hermite/Smith form of the
+        single circuit relation together with the finite symmetry of the weight
+        multiset. On the Gorenstein sub-class $w_i\mid\mathfrak d$ (the
+        unit-fraction weight systems, $\sim$$3462$ of them for $d=5$), this is
+        Conrads' classification of reflexive simplices by weight systems modulo
+        an explicit finite equivalence: \emph{here the fibre is computable from
+        the weights with no hull at all.}
+  \item \textbf{Lattice-quotient ($\mathbb Z_k$) coincidences.} Two WS defining
+        the same toric variety after a finite abelian quotient --- the
+        \texttt{z[][]}/\texttt{m[]}/\texttt{nz}/\texttt{index} data of the
+        \texttt{CWS} struct (Remark~\ref{rmk:cwsstruct}) and the
+        ``$+\mathbb Z_k$'' refinements of Theorem~\ref{thm:cws5types} ---
+        coincide for an \emph{arithmetically detectable} reason: compare the
+        sublattice index and quotient phases, no hull required.
+  \item \textbf{Secondary affine symmetries (oriented-matroid data).}
+        Non-permutation symmetries --- affine dependences among the monomial
+        generators beyond the defining circuit --- force extra automorphisms of
+        $\Delta_q$ (exactly what \texttt{Make\_Poly\_Sym\_NF},
+        Remark~\ref{rmk:nf-code}, must quotient) and predict coincidences. These
+        live in the sign pattern of the secondary circuits of $q$. Partial and,
+        in $d=5$, not fully systematized --- a genuine open thread.
+\end{enumerate}
+
+\begin{remark}[The honest negative, confirmed on the data]\label{rmk:fibrenegative}
+What \emph{cannot} be done is to decide \emph{general} fibre-membership --- two
+IP weight systems with inequivalent simplices but Newton polytopes coinciding
+after hulling --- without constructing the polytopes, because that coincidence
+is mediated by $\alpha$, which is non-local in the weights
+(Proposition~\ref{prop:lossy}\,(1)). The materialized map quantifies just how
+non-local: see Remark~\ref{rmk:fibredata}. The reflexive-simplex sub-class
+(predictor~2) is the one genuine exception, and is exactly solvable
+(Section~\ref{sec:fibre-dichotomy}); the general fibre is a
+$GL(d,\mathbb Z)$-orbit decision and is not reducible to a weight-local
+computation.
+\end{remark}
+
+\begin{remark}[What the materialized $d=5$ map shows]\label{rmk:fibredata}
+The \texttt{refpoly-5d} sample (a current snapshot of the
+$\mathrm{WS}\to\mathrm{NF}$ map over $\approx 5\times 10^{5}$ distinct normal
+forms and $\approx 9.3\times 10^{6}$ reflexive single weight systems) makes the
+preceding structure measurable. Three facts:
+\begin{enumerate}
+  \item[\textnormal{(i)}] \emph{The fibre is heavily skewed, not concentrated at
+        its mean.} About $36\%$ of normal forms are \emph{singletons}
+        ($\#\Phi^{-1}=1$); the median fibre is $2$; yet the largest observed
+        fibre exceeds $6.5\times 10^{5}$ weight systems. Only $\sim$$2\%$ of
+        weight systems sit in singleton fibres. The mean of
+        Remark~\ref{rmk:fibrequant} is therefore a poor summary; \emph{the
+        spread is the phenomenon.}
+  \item[\textnormal{(ii)}] \emph{Degree and multiset are \underline{not}
+        fibre-constant.} Across multi-WS fibres, the originating degree
+        $\mathfrak d$ is constant in only $\sim$$0.15\%$ of fibres and the
+        weight multiset in $0\%$ --- direct evidence that $\alpha$ fuses
+        weight systems of different degree and shape (the toric ``different
+        polynomials, same normal form''). This is the empirical refutation of
+        the naive sieve and the reason predictor~1 had to be split.
+  \item[\textnormal{(iii)}] \emph{Polytope invariants are nearly injective; the
+        cheap WS-local ones are nearly useless.} The full signature
+        $(h^{1,1},h^{1,2},h^{1,3},h^{2,2},\chi,\#\text{verts},\#\text{facets},
+        \ell,\ell^{*},M{:}np\,nv,N{:}np\,nv)$ separates all but $\sim$$7$ of
+        $5\times 10^{5}$ normal forms --- but every component requires $\alpha$.
+        The provably fibre-constant \emph{WS-local} invariants of predictor~1,
+        used as a sieve, resolve only $\sim$$0.17\%$ of weight-system pairs as
+        ``different,'' leaving $99.8\%$ to the hull$+$NF.
+\end{enumerate}
+The lesson for the stay-in-weight-space goal is stark: \emph{the discriminating
+information lives downstream of $\alpha$}, so a complete same-NF test cannot
+remain in weight space (Remark~\ref{rmk:fibredesign}), and the genuine
+weight-local handle is confined to the simplex sub-class
+(Section~\ref{sec:fibre-dichotomy}).
+\end{remark}
+
+\subsection{Q4 --- naive checks that two WS give the same polytope}
+\label{sec:fibre-naive}
+
+Ordered by cost; the predictors of Section~\ref{sec:fibre-predict} are precisely
+attempts to avoid the expensive complete checks here.
+
+\begin{enumerate}
+  \item \textbf{Construct $+$ normal-form comparison (complete, canonical).}
+        For each $q$ run $\alpha$ (\texttt{Make\_CWS\_Points},
+        Remark~\ref{rmk:cwspoints}), reflexivity (\texttt{IP\_Check} /
+        \texttt{Ref\_Check}), then \texttt{Make\_Poly\_NF}
+        (Remark~\ref{rmk:nf-code}). \emph{Same polytope $\iff$ \texttt{pNF}
+        matrices bit-for-bit equal.} This is the definition of the answer and
+        what the $88$M dedup does; it pays the full construction $+$ Hermite $+$
+        symmetry cost per WS.
+  \item \textbf{Construct $+$ brute-force $GL(d,\mathbb Z)$ search.} Build both
+        $\Delta_{q_i}$ and search for unimodular $M$ matching vertices. The
+        naivest \emph{correct} test, strictly worse than~1: the normal form
+        exists precisely to replace this exponential vertex matching by a
+        canonical-form comparison.
+  \item \textbf{Construct $+$ cheap-invariant prefilter, then NF.} Build both,
+        compare $M{:}np\,nv\ N{:}np\,nv$ and Hodge numbers first, run the NF
+        only on survivors. The standard practical baseline; the construct-first
+        cousin of predictor~1.
+  \item \textbf{Oriented vertex/point-set equality (incomplete).} Put both in a
+        deterministic but non-canonical orientation (e.g.\ lexicographically
+        sorted vertices) and compare. Catches \emph{identical} polytopes but
+        \emph{misses} $GL(d,\mathbb Z)$-equivalent-but-not-identical ones, so it
+        over-counts the fibre --- the failure mode that makes a true normal
+        form~1 necessary.
+\end{enumerate}
+
+\begin{remark}[The pipeline design principle]\label{rmk:fibredesign}
+Every \emph{complete} naive method (1--2) requires running $\alpha$ (build the
+polytope); by Remark~\ref{rmk:fibrenegative} no complete method stays in
+weight-space. The invariant methods (3, and predictors~1,3,4 of
+Section~\ref{sec:fibre-predict}) are incomplete but cheap. The art of
+\texttt{refpoly-5d} is to push maximal discrimination into the cheap
+weight-local/invariant sieve so that the expensive complete check~1 runs on as
+few within-bucket pairs as possible.
+\end{remark}
+
+%--------------------------------------------------------------
+\subsection{Why the reflexive-simplex sub-class is fully predictable and
+the rest is not}\label{sec:fibre-dichotomy}
+%--------------------------------------------------------------
+
+This subsection answers the sharp question directly: \emph{why is the
+reflexive-simplex sub-class fully predictable from the weight system alone,
+while the general case is not?} The dichotomy is exact and has a one-line cause:
+\emph{a simplex has no non-trivial subpolytope combinatorics --- its vertices
+\underline{are} the weight data --- whereas a non-simplicial Newton polytope is
+the convex hull of many monomials, and its $GL$-class depends on how those
+monomials are arranged, which is not a function of the weight multiset.}
+
+\begin{theorem}[Simplex/non-simplex dichotomy for the fibre]
+\label{thm:dichotomy}
+Let $q$ be a reflexive single weight system in dimension $d$.
+\begin{enumerate}
+  \item[\textnormal{(S)}] \emph{Simplex case.} If $\Delta_q$ is a $d$-simplex
+        (equivalently $\Delta_q=\nabla_q$, i.e.\ the only degree-$\mathfrak d$
+        monomials that survive to vertices are the $d{+}1$ fan generators), then
+        the $GL(d,\mathbb Z)$-class of $\Delta_q$ is a \emph{closed-form
+        function of $q$}: by Lemma~\ref{lem:ipcrit} and the
+        bijection~\eqref{eq:simplexws-bij}, $\Delta_q$ is determined up to $GL$
+        by its single circuit $\sum_i w_i v_i=0$ together with the index of the
+        sublattice the $v_i$ span. Two such $q,q'$ give $GL$-equal $\Delta$ iff
+        their circuit data agree up to a permutation and an explicit finite
+        lattice automorphism --- this is \textbf{Conrads' classification of
+        reflexive simplices by weight systems}. \emph{The fibre is computable
+        from the weights with no hull.}
+  \item[\textnormal{(N)}] \emph{Non-simplex case.} If $\Delta_q$ has more than
+        $d{+}1$ vertices, the extra vertices are degree-$\mathfrak d$ monomials
+        that are \emph{not} fan generators, and the face lattice of
+        $\operatorname{conv}$ of all monomials is \emph{not} recoverable from the
+        weight multiset: the same multiset of weights can produce different
+        hull combinatorics, and different multisets can produce the same hull
+        (Remark~\ref{rmk:fibredata}\,(ii)). The $GL$-class is then a genuine
+        orbit invariant of the realized point configuration, computed only by
+        $\beta$ (the normal form), with no weight-local closed form.
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}[The precise reason]
+In case~(S) the polytope has exactly $d{+}1$ vertices and $d{+}1$ facets; there
+is a \emph{unique} affine dependence among the vertices
+(Lemma~\ref{lem:ipcrit}), and its cleared-denominator coefficient vector
+\emph{is} the weight system. Hence ``which vertices, in what lattice'' carries
+no information beyond $q$ and the spanning index: a simplex has no proper
+sub-circuits, no choice of triangulation, no secondary fan --- nothing for $GL$
+to act on except the rigid frame the weights already pin down. The map
+$q\mapsto[\Delta_q]_{GL}$ is therefore injective up to the finite Conrads
+equivalence, and \emph{invertible in closed form}.
+
+In case~(N) the defining data is the \emph{set} of $\ell(\Delta_q)$ monomials
+on the weight hyperplane, and $\Delta_q=\operatorname{conv}$ of that set. The
+hull operation forgets every interior and edge-interior monomial and retains
+only the extreme ones; \emph{which} monomials are extreme depends on the metric
+arrangement of the whole degree-$\mathfrak d$ lattice slice, not on the weight
+multiset. Concretely, the extra information the non-simplex case needs and the
+simplex case does not is exactly the \emph{oriented matroid of the monomial
+point configuration} --- the full set of sign patterns of affine dependences
+among the generators (the ``secondary circuits''), which determines the face
+lattice and hence the $GL$-orbit. For a simplex this oriented matroid is the
+unique uniform one on $d{+}1$ points and contains no information beyond the
+circuit; for a hull of $>d{+}1$ monomials it is a rich, weight-non-local object.
+This is the precise content of predictor~4 of
+Section~\ref{sec:fibre-predict}. $\square$
+\end{proof}
+
+\begin{remark}[Restating the dichotomy in one sentence]\label{rmk:dichotomy}
+\emph{In the simplex case the vertices are the weight data; in the non-simplex
+case the vertices are a hull of many monomials whose combinatorics is extra,
+weight-non-local information.} That single difference is the whole reason
+predictor~2 is exact and predictors~1,3,4 are only partial. The Gorenstein
+unit-fraction weight systems ($w_i\mid\mathfrak d$, $\sim$$3462$ of them in
+$d=5$, OEIS A002966) are the cleanest inhabitants of case~(S); but case~(S) is
+\emph{not} the same as ``Gorenstein'' --- it is the geometric condition
+``$\Delta_q$ is a simplex,'' which one can read off cheaply by checking that
+$\Delta_q$ has exactly $d{+}1$ vertices (a single hull, far cheaper than the
+full NF).
+\end{remark}
+
+%--------------------------------------------------------------
+\subsection{Generalizing Conrads by Gale duality: the right objects, the
+genuine obstruction, and the ceiling}\label{sec:fibre-gale}
+%--------------------------------------------------------------
+
+Theorem~\ref{thm:dichotomy} draws the line where weight-space reasoning stops.
+This subsection answers the two sharp research questions it raises.
+\emph{Q1: what objects would \underline{generalize} Conrads' simplex method to
+the non-simplicial case?} \emph{Q2: what is the \underline{best} one could hope
+for --- a non-trivial relation deciding same-fibre membership without the normal
+form, ideally without even the convex hull of $\Delta_q$?} We frame both through
+\textbf{Gale duality}, isolate the one step that provably cannot stay in weight
+space, and stratify the answer by the \emph{Gale dimension}. We close with an
+empirical calibration on the full $2.3\times10^{9}$-polytope list that tells the
+reader exactly how much of \emph{their} data the tractable strata reach.
+
+\subsubsection*{Q1 --- Gale duality is the correct generalization of ``the
+weight system of a simplex''}
+
+The starting observation makes Conrads' method look like the bottom rung of a
+ladder rather than an isolated trick.
+
+\begin{proposition}[A (combined) weight system presents the space of affine
+relations]\label{prop:wsgale}
+Let $A=\{a_1,\dots,a_n\}\subset\mathbb Z^{d}$ be the vertex configuration of a
+polytope in $N_{\mathbb R}\cong\mathbb R^d$ (for us $A=\operatorname{Vert}
+\Delta_q$, sitting on the degree-$\mathfrak d$ slice), written projectively as
+the columns of
+\begin{equation}\label{eq:Ahat}
+  \widehat A=\begin{pmatrix} 1 & \cdots & 1\\ a_1 & \cdots & a_n\end{pmatrix}
+  \in\mathbb Z^{(d+1)\times n}.
+\end{equation}
+The \emph{space of affine dependences} (the linear relations
+$\sum_i\lambda_i a_i=0$, $\sum_i\lambda_i=0$) is $\ker\widehat A$, of dimension
+\begin{equation}\label{eq:galedim}
+  g \;=\; n-d-1 \;=:\; \text{the \emph{Gale dimension}}.
+\end{equation}
+A choice of basis of $\ker\widehat A$, recorded as the rows of a matrix
+$B\in\mathbb Z^{g\times n}$ with $\widehat A B^{\mathsf T}=0$, is a
+\emph{Gale transform} (Gale dual) $\widehat A^{\vee}=\{b^1,\dots,b^n\}\subset
+\mathbb R^{g}$ of $A$. A single weight system $w=(w_0,\dots,w_d)$ is exactly the
+case $n=d+1$, $g=1$: the one-dimensional relation space is spanned by the single
+circuit $\sum_i w_i v_i=0$ (Lemma~\ref{lem:ipcrit}), and ``the weight system''
+\emph{is} that $1$-row $B=(w_0,\dots,w_d)$. A combined weight system is a
+spanning set / partial basis of (part of) the same relation space: its $k$ rows
+are $k$ independent circuits, so it presents a $k$-dimensional subspace of
+$\ker\widehat A$.
+\end{proposition}
+
+\begin{proof}
+$\widehat A$ has full row rank $d+1$ (the $a_i$ affinely span), so $\dim\ker
+\widehat A=n-(d+1)=g$. The first row of $\widehat A$ forces $\sum_i\lambda_i=0$,
+i.e.\ $\ker\widehat A$ is precisely the affine (not merely linear) dependences.
+For $n=d+1$ this kernel is a line; clearing denominators of any nonzero vector in
+it gives the coprime circuit, whose entries are the $w_i$ of
+Lemma~\ref{lem:ipcrit}. The CWS statement is Definition~\ref{def:combined}
+re-read: each block circuit $\sum_i w^{(j)}_i v_i=0$ is an element of
+$\ker\widehat A$, and complementary-span (Theorem~\ref{thm:cwsvalid}) is linear
+independence of the corresponding rows. $\square$
+\end{proof}
+
+This reframes the whole problem. ``The weight system is an invariant of the
+simplex, not extra data'' (Remark~\ref{rmk:twofinite}) is the $g=1$ instance of
+the general fact that \emph{the Gale transform is a $GL(d,\mathbb Z)$-invariant
+of the configuration}: $A\mapsto MA$ for $M\in GL(d,\mathbb Z)$ leaves
+$\ker\widehat A$ unchanged, so the Gale dual is unchanged up to a change of basis
+$B\mapsto UB$, $U\in GL(g,\mathbb Z)$. The natural object generalizing ``the
+weight system of a simplex'' is therefore the Gale transform of the vertex
+configuration, \emph{decorated} with the two pieces of structure Conrads uses
+implicitly at $g=1$:
+
+\begin{definition}[The decorated Gale datum]\label{def:galedatum}
+For a vertex configuration $A$ with Gale dual $B\in\mathbb Z^{g\times n}$, the
+\emph{decorated Gale datum} is the triple
+\begin{equation}\label{eq:galedatum}
+  \bigl(\ \underline{\chi_B}\ ,\ \underline{\mathrm{SNF}}\ ,\ H\ \bigr),
+\end{equation}
+\begin{enumerate}
+  \item[\textnormal{(a)}] the \emph{oriented matroid} (chirotope) $\chi_B$ of the
+        Gale dual --- the list of signs of all maximal minors of $B$, equivalently
+        the sign vectors of all relations $\sum_i\lambda_i a_i=0$. This is the
+        affine-over-$\mathbb R$ combinatorial type of $A$: by the Gale criterion a
+        subset $F\subset A$ is a \emph{face} of $\operatorname{conv}A$ iff its
+        complement $A\setminus F$ is a \emph{positive (co)circuit} of the Gale
+        dual (the complementary points positively span $\mathbb R^g$). So
+        $\chi_B$ determines the entire face lattice;
+  \item[\textnormal{(b)}] the \emph{arithmetic decoration}: the Smith normal
+        forms of the circuit matrices (equivalently the elementary divisors of
+        $B$ and of the sublattice the relations cut out), recording the local
+        indices $[\,N : \langle\text{relevant sublattice}\rangle\,]$;
+  \item[\textnormal{(c)}] the \emph{torsion subgroup}
+        $H=N/\langle A\rangle_{\mathbb Z}$ (the finite quotient of the ambient
+        lattice by the sublattice generated by the configuration) --- the
+        ``$+\mathbb Z_k$'' data of the \texttt{CWS} struct
+        (Remark~\ref{rmk:cwsstruct}).
+\end{enumerate}
+\end{definition}
+
+\begin{theorem}[What the non-simplex case needs that the simplex case does not]
+\label{thm:galerefine}
+Equivalence of vertex configurations refines in two stages:
+\begin{equation}\label{eq:refinechain}
+  GL(d,\mathbb Z)\text{-equivalence}
+  \ \subsetneq\
+  \text{oriented-matroid (chirotope) equivalence},
+\end{equation}
+read as: $GL(d,\mathbb Z)$-equivalent configurations have the same chirotope, but
+the converse \emph{fails}. The gap is exactly the arithmetic decoration
+(b)--(c): two configurations with the same chirotope $\chi_B$ can have different
+lattice indices/torsion and hence be $GL(d,\mathbb Z)$-inequivalent. At $g=1$
+(the simplex) the chirotope is the unique uniform oriented matroid on $d{+}1$
+points and carries \emph{no} information beyond ``it is a simplex''; there the
+entire content is arithmetic, and the decoration collapses to the single Smith
+form of the circuit $(w_0,\dots,w_d)$ --- which is precisely
+\textbf{Conrads' invariant}. For $g\ge1$ with $>d{+}1$ points the chirotope is
+genuine combinatorial data \emph{and} the arithmetic decoration is needed on top
+of it.
+\end{theorem}
+
+\begin{proof}[Mechanism]
+A unimodular $M\in GL(d,\mathbb Z)$ permutes nothing and preserves all signed
+affine dependences, hence preserves $\chi_B$; this is the inclusion. That it is
+strict is exactly the false-positive phenomenon already exhibited in
+Example~\ref{ex:fp1}: there $q=(1,1,1,1,1,1)$ and $q'=(1,1,2,2,2,4)$ are both
+$5$-simplices --- \emph{identical} chirotope (the uniform one on $6$ points),
+identical face lattice, identical normalized volume --- yet $GL(5,\mathbb Z)$-
+inequivalent, separated only by the circuit Smith data $(1,1,1,1,1,1)$ vs.\
+$(1,1,2,2,2,4)$. That separating datum is the arithmetic decoration (b). The
+$g=1$ collapse is Lemma~\ref{lem:ipcrit}: one circuit, one Smith form, no
+combinatorial freedom. $\square$
+\end{proof}
+
+\begin{remark}[The generalization, stated as a program]\label{rmk:galeprogram}
+Conrads at $g=1$ inputs the circuit and outputs a closed-form $GL$-class because
+\emph{the chirotope is trivial and only the arithmetic remains}. The honest
+generalization to $g\ge1$ is: \emph{(i)} compute the chirotope $\chi_B$ of the
+Gale dual (this fixes the face lattice and the $GL$-orbit \emph{up to} the
+arithmetic refinement); \emph{(ii)} compute the Smith/torsion decoration
+(b)--(c) to resolve the residual arithmetic ambiguity within a chirotope class.
+The pair $(\chi_B,\text{decoration})$ is a \emph{complete} $GL(d,\mathbb Z)$-
+invariant of the configuration. Nothing here is conjectural --- it is a faithful
+restatement of the orbit problem. The catch is entirely in the \emph{input}:
+one must already know $A=\operatorname{Vert}\Delta_q$. That is the obstruction.
+\end{remark}
+
+\subsubsection*{Q2, part 1 --- the genuine obstruction: which step needs the hull}
+
+\begin{theorem}[Weight-local vs.\ hull-requiring: a clean separation]
+\label{thm:obstruction}
+Run the program of Remark~\ref{rmk:galeprogram} on a single weight system $q$.
+Then:
+\begin{enumerate}
+  \item[\textnormal{(W)}] \emph{Genuinely weight-local} (no hull; only linear
+        algebra over $\mathbb Q$ on the relation matrix and integer
+        Smith-normal-form / index computations): everything \emph{downstream of
+        knowing the vertex set}. Given $A=\operatorname{Vert}\Delta_q$ as input,
+        the Gale dual $B$, its chirotope $\chi_B$, the Smith decoration, and the
+        torsion $H$ are all polynomial-time linear-algebraic functions of $A$ ---
+        no convexity, no normal form.
+  \item[\textnormal{(H)}] \emph{Provably requires the hull}: the determination of
+        \emph{which} degree-$\mathfrak d$ lattice points of $q$ are
+        \underline{vertices} of $\Delta_q$. Selecting $\operatorname{Vert}
+        \Delta_q$ from the $\ell(\Delta_q)$ monomials is exactly the
+        \emph{convex-hull / per-point LP-feasibility} problem ($x$ is a vertex iff
+        $x\notin\operatorname{conv}(\text{other points})$, a linear program), and
+        it is not a function of the weight multiset
+        (Theorem~\ref{thm:dichotomy}(N), Remark~\ref{rmk:fibredata}(ii)).
+\end{enumerate}
+Consequently the irreducible residue, after all weight-local work, is the
+\textbf{lattice-polytope $GL(d,\mathbb Z)$-isomorphism problem on the
+vertex configuration} --- and its only weight-non-local ingredient is the vertex
+selection~(H).
+\end{theorem}
+
+\begin{proof}[Where it bites]
+Statement (W) is Theorem~\ref{thm:galerefine}: the chirotope is the sign data of
+minors of $B$, $B$ is a kernel basis of $\widehat A$, and Smith forms and the
+torsion $N/\langle A\rangle$ are integer linear algebra --- all polynomial in the
+bit-size of $A$. Statement (H) is the content of the lossy arrow $\alpha$
+(Proposition~\ref{prop:lossy}(1)): $\Delta_q$ is $\operatorname{conv}$ of all
+degree-$\mathfrak d$ monomials, and the hull retains only the extreme ones; which
+monomials are extreme depends on the metric arrangement of the whole lattice
+slice, not on $(w_0,\dots,w_d)$. There is no closed form for ``vertex or not''
+that avoids a feasibility test, and Remark~\ref{rmk:fibredata}(ii) shows
+empirically that even $\#\operatorname{Vert}$ is not a function of the weight
+multiset. Hence the one step the program cannot import from weight space is
+exactly the one Q2 wished to avoid. $\square$
+\end{proof}
+
+\begin{remark}[Reading the obstruction honestly]\label{rmk:obstruction}
+This is the precise, and slightly deflationary, answer to Q2's strongest form
+(``without even the convex hull''): \emph{the hull is unavoidable, because the
+vertex set is the input to every invariant downstream, and the vertex set is the
+hull.} What \emph{is} salvaged is sharp and useful: once the (single, unavoidable)
+hull has produced $\operatorname{Vert}\Delta_q$, the entire $GL$-classification
+is weight-local linear/arithmetic algebra via the Gale datum --- one never needs
+the expensive symmetry-reduced normal form $\beta$ of Section~\ref{sec:algo-nf}.
+This is exactly the gain already cashed out in sieve stage~\textbf{S3}
+(Section~\ref{sec:fibre-sieve}) for $g=1$; the program extends that gain to all
+strata, replacing $\beta$ by ``(one hull) $+$ Gale datum.''
+\end{remark}
+
+\subsubsection*{Q2, part 2 --- the ceiling: a Gale-dimension hierarchy}
+
+The best achievable is therefore a \emph{layered} statement, stratified by the
+Gale dimension $g=n-d-1$ of~\eqref{eq:galedim}. Each layer is a known chapter of
+the theory of \emph{polytopes with few vertices} (Gale diagrams).
+
+\begin{theorem}[The few-vertex / Gale-dimension ceiling]\label{thm:ceiling}
+Let $q$ be a reflexive single weight system in dimension $d$ with
+$\Delta_q$ having $n$ vertices, $g=n-d-1$.
+\begin{enumerate}
+  \item[$g=0$ \textnormal{($n=d{+}1$, simplices):}] Conrads is \emph{complete and
+        closed-form}: $\Delta_q$ is determined up to $GL(d,\mathbb Z)$ by the
+        single circuit's Smith form (Theorem~\ref{thm:dichotomy}(S)). No hull
+        beyond confirming $n=d{+}1$. \emph{Done.}
+  \item[$g=1$ \textnormal{($n=d{+}2$):}] The Gale diagram is a configuration of
+        $n$ signs $\{+,-,0\}$ on a line --- the classical Gale-diagram description
+        of polytopes with $d{+}2$ vertices (Gr\"unbaum). The chirotope is fixed by
+        the multiset of signs, so the face lattice is a closed-form function of
+        the sign pattern of the single nontrivial relation among the vertices.
+        \emph{Claim (the concrete novel target):} the $GL(d,\mathbb Z)$-class is a
+        closed-form function of the Gale sign pattern together with the arithmetic
+        decoration (b)--(c) of Definition~\ref{def:galedatum} --- i.e.\ Conrads
+        \emph{genuinely generalizes} here, with no normal form, only the Smith
+        data of the (now two-dimensional) relation lattice.
+  \item[$g=2$ \textnormal{($n=d{+}3$):}] The Gale diagram is an \emph{affine}
+        point configuration in the plane (Gale's ``standard diagram''); the
+        combinatorial types of $d{+}3$-vertex polytopes are still classifiable in
+        principle, so the chirotope is enumerable and the program
+        (Remark~\ref{rmk:galeprogram}) remains tractable.
+  \item[$g\ge3$:] The oriented-matroid classification grows wildly (realizability
+        becomes $\exists\mathbb R$-complete in general); no closed form is
+        available, and one falls back on a \emph{sound-but-incomplete} invariant
+        sieve plus the normal form on the residue.
+\end{enumerate}
+\end{theorem}
+
+\begin{remark}[The honest ``best we can hope for'']\label{rmk:ceiling}
+Assembling Theorem~\ref{thm:ceiling}: the optimal attainable object is
+\emph{a polynomial-time, $GL(d,\mathbb Z)$-invariant computable from the (C)WS
+relation matrix plus a single hull, that is}
+\begin{itemize}
+  \item \emph{complete} on the structurally characterized low-Gale-dimension
+        strata $g\le 2$ (the generalized Conrads: chirotope of a $\le2$-dim Gale
+        diagram $+$ arithmetic decoration), \emph{replacing $\beta$ entirely};
+  \item a \emph{refined sound sieve} for $g\ge3$ (the fibre-constant WS-local
+        invariants of predictor~1, $+$ the near-injective polytope signature S5),
+        which decides ``different'' cheaply but cannot certify ``same'';
+  \item with a \emph{provable irreducible residue}: the within-chirotope,
+        $g\ge3$ pairs, whose separation is the genuine lattice-polytope
+        $GL(d,\mathbb Z)$-isomorphism problem (Theorem~\ref{thm:obstruction}).
+\end{itemize}
+A clean impossibility statement is as valuable as the positive one: \emph{no
+weight-local computation can decide same-fibre membership in the $g\ge3$ residue
+without the hull}, because the discriminating data (the vertex set, hence the
+chirotope) is created by $\alpha$ and is provably not a function of the weights
+(Theorem~\ref{thm:obstruction}, Remark~\ref{rmk:fibredata}). Q2 has a sharp
+two-part answer: \emph{yes} below $g=3$ (and even without $\beta$), \emph{no}
+above it (not even without $\alpha$).
+\end{remark}
+
+\begin{remark}[Surrounding theory to draw on]\label{rmk:surrounding}
+The program sits inside well-developed machinery the reader can pull on directly.
+\emph{(i)} The \textbf{GKZ secondary polytope / secondary fan} of the point
+configuration $A$ (Gelfand--Kapranov--Zelevinsky) organizes \emph{all} regular
+triangulations of $A$; its rays are the circuits, so the (C)WS data are
+coordinates on the secondary fan and the ``secondary circuits'' of predictor~4
+(Section~\ref{sec:fibre-predict}) are literally its $1$-skeleton. \emph{(ii)} The
+\textbf{$A$-discriminant} (GKZ) is the locus in coefficient space where $\alpha$'s
+hull degenerates --- the analytic shadow of the vertex-selection problem~(H).
+\emph{(iii)} The \textbf{Gale diagrams of polytopes with few vertices}
+(Gr\"unbaum; Sturmfels) are exactly the $g\le2$ classification of
+Theorem~\ref{thm:ceiling}. \emph{(iv)} The \textbf{lattice/arithmetic refinement
+of oriented matroids} --- chirotope plus elementary-divisor data --- is the
+formal home of the decoration (b)--(c) and of inclusion~\eqref{eq:refinechain}.
+\end{remark}
+
+\subsubsection*{Q2, part 3 --- empirical calibration: does this reach the
+Sch\"oller--Skarke data?}
+
+The hierarchy is the right \emph{ceiling}; whether it is worth building for
+\emph{this} dataset is an empirical question, because Sch\"oller--Skarke
+enumerates \emph{maximal} reflexive polytopes (Remark~\ref{rmk:datasetnumbers}),
+which --- being duals of \emph{minimal} ones --- tend to have \emph{many}
+vertices, i.e.\ \emph{large} Gale dimension. We measured the vertex-count
+distribution over the \emph{entire} classification.
+
+\begin{remark}[Vertex-count / Gale-dimension distribution of the full $d=5$
+list]\label{rmk:galecalib}
+Over all $N_{\mathrm{NF}}=2\,377\,115\,412$ distinct normal forms and
+$N_{\mathrm{WS}}=185\,269\,499\,015$ reflexive single weight systems (the
+materialized $\mathrm{WS}\to\mathrm{NF}$ table; per-vertex breakdown measured
+directly), with $d=5$ so $g=n_v-6$:
+\begin{center}\small
+\begin{tabular}{r r r r r r}
+\hline
+$n_v$ & $g$ & \#NF & \% of NF & \#WS (fibre mass) & \% of WS \\
+\hline
+$6$  & $0$ & $50\,001$        & $0.0021\%$ & $1.31\times10^{9}$ & $0.71\%$ \\
+$7$  & $1$ & $378\,704$       & $0.0159\%$ & $4.87\times10^{9}$ & $2.63\%$ \\
+$8$  & $2$ & $1\,856\,608$    & $0.0781\%$ & $9.90\times10^{9}$ & $5.35\%$ \\
+$9$  & $3$ & $6\,489\,821$    & $0.273\%$  & $1.47\times10^{10}$& $7.92\%$ \\
+$12$ & $6$ & $7.30\times10^{7}$& $3.07\%$  & $2.09\times10^{10}$& $11.25\%$ \\
+$16$ & $10$& $2.38\times10^{8}$& $10.0\%$  & $1.23\times10^{10}$& $6.65\%$ \\
+$17$ & $11$& $2.52\times10^{8}$& $10.6\%$  & $9.45\times10^{9}$ & $5.10\%$ \\
+\hline
+\end{tabular}
+\end{center}
+(The full table runs $n_v=6,\dots,46$; the distribution peaks at $n_v=17$ by NF
+count and $n_v=12$ by WS mass, with median $n_v\approx17$.) The cumulative
+tractable strata are
+\begin{center}\small
+\begin{tabular}{l r r}
+\hline
+stratum & \% of NF & \% of WS \\
+\hline
+$g=0$ ($n_v=6$, simplices, Conrads) & $0.0021\%$ & $0.71\%$ \\
+$g\le1$ ($n_v\le7$)                 & $0.018\%$  & $3.34\%$ \\
+$g\le2$ ($n_v\le8$)                 & $0.096\%$  & $8.68\%$ \\
+$g\le5$ ($n_v\le11$)                & $2.77\%$   & $37.5\%$ \\
+$g\le10$ ($n_v\le16$)               & $36.3\%$   & $84.1\%$ \\
+\hline
+\end{tabular}
+\end{center}
+\end{remark}
+
+\begin{remark}[What the calibration means for the stay-in-weight-space goal]
+\label{rmk:galecalib-read}
+Two readings, and they point opposite ways --- this is the honest punchline.
+\begin{enumerate}
+  \item[\textnormal{(i)}] \emph{By NF count the program is marginal.} The
+        closed-form strata $g\le2$ contain only $0.096\%$ of the distinct
+        polytopes; the median polytope has $n_v\approx17$ ($g\approx11$), deep in
+        the explosive regime where Remark~\ref{rmk:ceiling}'s impossibility bites.
+        If the goal is to classify \emph{NFs}, the Gale program resolves a sliver
+        and the $GL(5,\mathbb Z)$ normal form remains unavoidable for the bulk.
+  \item[\textnormal{(ii)}] \emph{By weight-system mass it is far from marginal.}
+        The same $g\le2$ strata carry $8.7\%$ of all weight systems, and
+        $g\le5$ carries $37.5\%$, because low-vertex polytopes have enormous
+        fibres (mean fibre $\approx26\,000$ at $n_v=6$, $\approx12\,900$ at
+        $n_v=7$, versus $\approx 80$ overall). Strikingly, the
+        \emph{single largest fibre in the entire classification} ---
+        $650\,642\,665$ weight systems collapsing to one polytope, the maximal-
+        $h^{1,1}$ ($h^{1,1}=28\,348$) Calabi--Yau fourfold of weight system
+        $(62,81,491,1206,1647,1840)$ --- has $n_v=7$, i.e.\ \emph{Gale dimension
+        $1$}. Since the dedup cost is paid \emph{per weight-system pair}, a
+        generalized-Conrads predictor on $g\le2$ would short-circuit the
+        $\beta$-step for nearly a tenth of all weight systems, concentrated in
+        exactly the giant fibres that dominate the comparison load.
+\end{enumerate}
+The verdict: the Gale-stratification program is the correct theoretical ceiling
+and is \emph{operationally worthwhile precisely because the fibre mass is
+front-loaded onto the few-vertex strata}, even though those strata are a
+vanishing fraction of the polytopes. It does \emph{not} dissolve the residue ---
+the high-$g$ bulk provably needs the normal form (Remark~\ref{rmk:ceiling}) ---
+but it removes the heaviest fibres from the expensive path. (Methodological note:
+the per-row \texttt{vertex\_count} column of the $5\times10^{5}$ \emph{sample}
+parquet is unreliable; the true $n_v$ here is read from the normal-form vertex
+matrix \texttt{nf\_vertices} and cross-checked against the full-classification
+per-vertex tally.)
+\end{remark}
+
+%--------------------------------------------------------------
+\subsection{Predictor 4 worked out: a positive coincidence and two honest
+false positives}\label{sec:fibre-worked}
+%--------------------------------------------------------------
+
+We make predictor~4 (Section~\ref{sec:fibre-predict}) and the dichotomy
+(Theorem~\ref{thm:dichotomy}) concrete on small, hand-checkable $d=5$ weight
+systems. All Newton polytopes below were verified by exact integer arithmetic
+(facet normals over $\mathbb Q$); ``$\#$verts / $\#$facets'' and the facet
+lattice-distances are exact.
+
+\begin{example}[Positive: a coincidence detectable from the WS alone]
+\label{ex:positive}
+Let $q=(1,1,1,1,2,2)$ and $q'=(1,1,2,2,1,1)$, both of degree $\mathfrak d=8$.
+They are the \emph{same weight multiset} in a different coordinate order. The
+coordinate permutation $\pi$ carrying $q$ to $q'$ acts on the monomial lattice
+$\mathbb Z^{6}$ by permuting coordinates --- a \emph{lattice automorphism} --- and
+sends the degree-$8$ monomials of $q$ bijectively onto those of $q'$. Hence
+$\Delta_{q}$ and $\Delta_{q'}$ are equal after this unimodular map:
+$\mathrm{NF}(\Delta_q)=\mathrm{NF}(\Delta_{q'})$, \emph{provably and from the
+weights alone}, with no hull. This is the firing case of predictor~4 in its
+simplest guise (the automorphism is a coordinate permutation); the genuine
+content of predictor~4 is the \emph{non}-permutation lattice automorphisms,
+which require the oriented-matroid data of
+Theorem~\ref{thm:dichotomy}(N). Empirically (Remark~\ref{rmk:fibredata}) the
+multiplicity profile, here $\{1{:}4,\,2{:}2\}$, is one of the few provably
+fibre-constant WS-local invariants --- consistent with permutation-coincidences
+being the cleanest detectable collapses.
+\end{example}
+
+\begin{example}[False positive I: a strong fingerprint that still fails]
+\label{ex:fp1}
+Consider the two reflexive single weight systems
+\[
+  q=(1,1,1,1,1,1)\ (\mathfrak d=6),
+  \qquad
+  q'=(1,1,2,2,2,4)\ (\mathfrak d=12).
+\]
+Both Newton polytopes are reflexive $5$-\emph{simplices}: each has
+\emph{exactly} $6$ vertices, $6$ facets all at lattice distance $1$, and the
+\emph{same} normalized volume $5!\cdot\operatorname{vol}=7776=6^{5}$ --- they
+agree on every coarse and even most fine invariants one might hope to use.
+\emph{Yet they are not $GL(5,\mathbb Z)$-equivalent.} The separating invariant is
+exactly the one Theorem~\ref{thm:dichotomy}(S) singles out: the intrinsic
+circuit weight (the unique positive relation among the six vertices and the
+interior point) is $(1,1,1,1,1,1)$ for $q$ but $(1,1,2,2,2,4)$ for $q'$. So on
+the simplex sub-class the cheap circuit normal form decides correctly where
+volume, vertex- and facet-counts all collide --- which is precisely why
+predictor~2 is the right tool there, and why a generic fingerprint (vertices,
+facets, volume, facet-distances) is \emph{not} enough.
+\end{example}
+
+\begin{example}[False positive II: equal cheap WS invariants, different polytope]
+\label{ex:fp2}
+Consider
+\[
+  q=(1,1,1,3,4,4),
+  \qquad
+  q'=(1,1,2,2,2,6),
+  \qquad \text{both of degree } \mathfrak d=14 .
+\]
+They have the \emph{identical} two cheapest polytope-blind invariants: degree
+$14$ and exactly $651$ degree-$\mathfrak d$ monomials. A naive sieve keying on
+$(\mathfrak d,\ell)$ would bucket them together. But their Newton polytopes
+differ: $\Delta_q$ has $(\#\text{verts},\#\text{facets})=(14,9)$ and is
+\emph{not even reflexive} (a facet sits at lattice distance $5$), while
+$\Delta_{q'}$ has $(10,7)$ and \emph{is} reflexive (all facets at distance $1$).
+This is the honest limit of any purely WS-local predictor: matching cheap
+invariants is necessary, never sufficient, and here the discrepancy only
+surfaces after $\alpha$. (It also re-illustrates the $d=5$ watershed of
+Section~\ref{sec:fibre-three}: $\Delta_q$ is IP but non-reflexive, the failure
+mode that \texttt{Ref\_Check} exists to catch.)
+\end{example}
+
+\begin{remark}[Reading the three examples together]\label{rmk:worked}
+Example~\ref{ex:positive} shows predictor~4 \emph{can} certify a coincidence
+from the weights alone --- when a lattice automorphism (here a permutation) is
+visible in the WS. Example~\ref{ex:fp1} shows that on the simplex sub-class the
+\emph{correct} certificate is the circuit weight (predictor~2), not a metric
+fingerprint. Example~\ref{ex:fp2} shows that off the simplex sub-class no cheap
+WS-local invariant is decisive. Together they delimit exactly where weight-space
+reasoning succeeds (case~S, Theorem~\ref{thm:dichotomy}) and where it cannot
+(case~N).
+\end{remark}
+
+%--------------------------------------------------------------
+\subsection{A prioritized sieve for the Sch\"oller--Skarke $d=5$ list}
+\label{sec:fibre-sieve}
+%--------------------------------------------------------------
+
+We synthesize the above into an ordered pipeline that buckets weight systems
+into \emph{provably-same}, \emph{provably-different}, and
+\emph{undecided-without-NF}, maximizing the fraction decided \emph{before}
+paying for $\alpha+\beta$. The numerical resolution figures are measured on the
+materialized map (Remark~\ref{rmk:fibredata}).
+
+\begin{enumerate}
+  \item[\textbf{S0}] \textbf{Canonicalize the WS (free).} Sort the weights
+        ascending and reduce by $\gcd$ (already $1$ on the Sch\"oller--Skarke
+        list). \emph{Output:} a canonical weight tuple; two WS with the same
+        canonical tuple are \emph{identical}, not merely fibre-mates.
+  \item[\textbf{S1}] \textbf{Provably-same by permutation (free, \emph{decides
+        same}).} Group WS by their sorted weight \emph{multiset}. Within a
+        group, any two are related by a coordinate permutation, hence give the
+        same $\mathrm{NF}$ (Example~\ref{ex:positive}). \emph{This is the only
+        cheap test that \underline{certifies} same-NF.} Caution: it does
+        \emph{not} find all same-NF pairs, because the multiset is \emph{not}
+        fibre-constant (Remark~\ref{rmk:fibredata}(ii)); different multisets can
+        still share an NF.
+  \item[\textbf{S2}] \textbf{Provably-different by fibre-constant WS-local
+        invariants (free, \emph{decides different}).} Compute the vector of
+        \emph{provably fibre-constant} WS-local invariants:
+        $\#\{w_i\}$ (distinct weights), the multiplicity profile, $\#\{i:w_i=1\}$,
+        and the Gorenstein flag $w_i\mid\mathfrak d$. Two WS that differ on this
+        vector are in \emph{different} fibres. \emph{Honest yield:} on the
+        materialized map this resolves only $\sim$$0.17\%$ of pairs --- coarse,
+        but free and sound. (Degree, $\min$, $\max$, $\#$Gorenstein slots are
+        \emph{not} fibre-constant and must \underline{not} be used here.)
+  \item[\textbf{S3}] \textbf{Simplex sub-class: solve exactly (one hull, no NF).}
+        Build $\Delta_q$ once and test whether it is a $d$-simplex
+        ($\#\text{verts}=d{+}1$); if so, compute the intrinsic circuit weight
+        and apply \textbf{Conrads' equivalence} (Theorem~\ref{thm:dichotomy}(S),
+        Example~\ref{ex:fp1}). \emph{This decides the fibre completely for the
+        simplex sub-class} at the cost of a single hull and an integer normal
+        form of one $(d{+}1)$-vector --- far cheaper than the full
+        $\mathrm{NF}(\Delta_q)$, and it correctly separates the volume-colliding
+        pairs that defeat metric fingerprints.
+  \item[\textbf{S4}] \textbf{$\mathbb Z_k$ lattice-quotient coincidences
+        (arithmetic).} For WS carrying a sublattice quotient (the
+        $\texttt{z}/\texttt{m}/\texttt{nz}/\texttt{index}$ data of the
+        \texttt{CWS} struct, Remark~\ref{rmk:cwsstruct}), compare the index and
+        quotient phases; equal quotient data on otherwise-matching circuits
+        forces the same NF without a further hull (predictor~3).
+  \item[\textbf{S5}] \textbf{Polytope-invariant prefilter (one hull each,
+        \emph{decides different}).} For the non-simplex residue, build $\Delta_q$
+        and bucket by the strong signature
+        $(\ell,\ell^{*},\#\text{verts},\#\text{facets},h^{1,1},h^{1,2},h^{1,3},
+        h^{2,2},\chi,M{:}np\,nv,N{:}np\,nv)$. Different signatures $\Rightarrow$
+        different NF; this signature is \emph{nearly injective}
+        (Remark~\ref{rmk:fibredata}(iii)), so the within-bucket residue is tiny.
+        These invariants are \emph{not} WS-local --- they cost one $\alpha$ ---
+        but no $\beta$.
+  \item[\textbf{S6}] \textbf{Normal form (the certificate, \emph{decides
+        both}).} On the within-signature residue only, compute
+        $\mathrm{NF}(\Delta_q)$ (Section~\ref{sec:algo-nf}) and compare
+        bit-for-bit. This is the irreducible step: by
+        Proposition~\ref{prop:lossy}(2) and Remark~\ref{rmk:fibredata} the
+        general fibre is a $GL(d,\mathbb Z)$-orbit decision with no weight-local
+        shortcut.
+\end{enumerate}
+
+\begin{remark}[What each stage can and cannot resolve]\label{rmk:sieveyield}
+The sieve cleanly separates the sound cheap tests from the expensive complete
+one:
+\begin{itemize}
+  \item \textbf{Decided in pure weight space (S0--S2,S4):} exact \emph{equality}
+        of WS (S0); \emph{same}-NF by permutation (S1); \emph{different}-NF by
+        fibre-constant invariants (S2, $\sim$$0.17\%$ of pairs) and by quotient
+        data (S4). Sound but \emph{incomplete} --- by
+        Remark~\ref{rmk:fibredata} the vast majority of pairs survive to a hull.
+  \item \textbf{Decided with one hull, no NF (S3,S5):} the entire \emph{simplex
+        sub-class} (S3, exactly, via Conrads) and \emph{most} of the rest as
+        \emph{different} via the near-injective signature (S5).
+  \item \textbf{Irreducible residue (S6):} the within-signature, non-simplex
+        pairs --- genuinely different weight systems whose Newton polytopes
+        coincide after hulling. \emph{This is the only part that truly needs the
+        $GL(d,\mathbb Z)$ normal form}, and it is irreducibly so.
+\end{itemize}
+The design goal --- ``maximize the fraction decided without the NF'' --- is met
+by S1--S5; the honest conclusion is that a \emph{complete} same-NF decision
+cannot stay in weight space, and the cheapest complete sieve is
+``permutation $+$ one hull $+$ near-injective signature $+$ NF on the small
+residue.''
+\end{remark}
+
+%--------------------------------------------------------------
+\subsection{Computational realization and verification: the Gale fibre key on
+the materialized $88.6\text{M}$-fibre $d=5$ list}\label{sec:fibre-verify}
+%--------------------------------------------------------------
+
+We implemented the program of Section~\ref{sec:fibre-gale} as a concrete,
+hashable \emph{Gale fibre key} and tested it against ground truth on the
+materialized $\mathrm{WS}\to\mathrm{NF}$ sample: a table with \emph{one row per
+distinct normal form}, $N=88{,}588{,}676$ fibres in total (a sample of the full
+$2.377\times10^{9}$; each row carries its complete weight-system fibre and the
+PALP normal-form vertex matrix \texttt{nf\_vertices}). The experiment answers, at
+scale and against the true NF, the operational question behind
+Remark~\ref{rmk:ceiling}: \emph{how complete is the ``(one hull) $+$ Gale
+datum'' replacement for $\beta$, and where exactly does it stop?}
+
+\subsubsection*{The key as a layered $GL(5,\mathbb Z)$-invariant}
+
+Given $A=\operatorname{Vert}\Delta_q$ (the single, unavoidable hull of
+Theorem~\ref{thm:obstruction}), the key is the cumulative tuple
+\begin{equation}\label{eq:keylayers}
+  \underbrace{(g,n_v,n_F,\operatorname{vol})}_{\mathrm{L0}}\ \prec\
+  \underbrace{+\,\text{facet-size \& vertex-degree multisets}}_{\mathrm{L1}\ (\text{combinatorial type})}\ \prec\
+  \underbrace{+\,\text{vertex--facet pairing multisets}}_{\mathrm{Lpm}}\ \prec\
+  \underbrace{+\,\mathrm{SNF}}_{\mathrm{Lar}}\ \prec\
+  \underbrace{+\,|\text{brackets}|}_{\mathrm{Lbr}}\ \prec\
+  \underbrace{+\,\mathrm{Los}}_{\text{signed chirotope}},
+\end{equation}
+each layer a permutation- and $GL(5,\mathbb Z)$-invariant of $A$ computed by exact
+integer linear algebra (facet normals as integer cofactor cross products; Smith
+forms; brackets $|\det(\widehat a_{i_0},\dots,\widehat a_{i_5})|$). Layers
+$\mathrm{Lar},\mathrm{Lbr},\mathrm{Los}$ are the computable surrogates for the
+decorated Gale datum~\eqref{eq:galedatum}: $\mathrm{Lbr}$ is the
+\emph{unsigned} chirotope (GKZ bracket magnitudes), $\mathrm{Los}$ the
+\emph{signed} chirotope, and $\mathrm{Lar}$ the arithmetic decoration. The
+signed-chirotope layer $\mathrm{Los}$ is built to be invariant under the
+\emph{full} symmetry, including the global reorientation a $\det=-1$ lattice map
+induces: vertices are color-ordered by their $GL$-invariant pairing signature, the
+signed integer bracket is recorded on color-distinct $6$-subsets (magnitude only
+on ties, where the sign is not canonical), and the resulting multiset is
+symmetrized over a single global sign flip.
+
+\begin{proposition}[Well-definedness, verified]\label{prop:keywd}
+Every layer in~\eqref{eq:keylayers} is constant on $GL(5,\mathbb Z)\times
+S_{n_v}$-orbits, \emph{including orientation-reversing} ($\det=-1$) maps. Hence
+the key never splits a true fibre: all weight systems of one fibre receive one
+key. \emph{Tested:} randomized $GL(5,\mathbb Z)$ (both orientations) $+$ vertex
+relabelings on configurations across $g=1,\dots,30$, with zero changes of any
+layer; the exact-arithmetic path was confirmed on scrambles with coordinates up
+to $\sim\!2000$ (where floating-point determinants fail).
+\end{proposition}
+
+\subsubsection*{Completeness against the true NF: the cascade result}
+
+A single shared-memory pass (one compute node, $64$ cores, $\approx\!26$ min)
+first groups all $N$ fibres by the \emph{free} invariants already in the table
+($h^{1,1},h^{1,2},h^{1,3},h^{2,2},\chi$, and lattice-point / vertex / facet
+counts), then computes the geometric layers \emph{only} on the residual
+collisions. The result, compared bit-for-bit against the stored normal forms:
+\begin{center}\small
+\begin{tabular}{l r}
+\hline
+quantity & value \\
+\hline
+fibres (distinct NF) & $88{,}588{,}676$ \\
+separated by free invariants alone & $77{,}379{,}106$ \ ($87.35\%$) \\
+distinct free-invariant classes & $82{,}325{,}277$ \\
+needing geometry (free-collisions) & $11{,}209{,}570$ \ ($12.65\%$) \\
+distinct classes of cheap key $\mathrm{(free}\oplus\mathrm{L1}\oplus\mathrm{Lpm})$ & $88{,}588{,}633$ \\
+\textbf{residual collisions (over-merged fibres)} & $\mathbf{85}$ \ ($9.6\times10^{-7}$) \\
+nonreflexive (sanity) & $0$ \\
+\hline
+\end{tabular}
+\end{center}
+So the cheap combined key --- the cumulative tuple through $\mathrm{Lpm}$,
+i.e.\ \emph{combinatorial type $+$ pairing matrix}, requiring no Smith forms or
+brackets --- is \textbf{injective on $99.99990\%$ of all fibres}. This is the
+sieve of Section~\ref{sec:fibre-sieve}, stages S5--S6, made concrete and measured:
+the ``near-injective signature'' S5 is in fact injective up to a $10^{-6}$
+residue, and the Gale datum has replaced $\beta$ everywhere except on $85$
+fibres.
+
+\subsubsection*{The $85$-fibre hard core: a sharpening of
+Theorem~\ref{thm:galerefine}}
+
+The $85$ residual fibres fall into $42$ groups ($41$ pairs and one triple),
+concentrated at low Gale dimension $g\in\{2,\dots,11\}$ (none higher). We
+resolved their status exactly.
+
+\begin{theorem}[The bounded-invariant hard core is genuine and survives the
+oriented matroid]\label{thm:hardcore}
+For each of the $42$ groups, the members are pairwise
+$GL(5,\mathbb Z)$-\emph{inequivalent} (verified by exhaustive color-matched
+unimodular search: no integer $U$ with $\det U=\pm1$ maps one vertex set onto
+another), yet they are \emph{identical} on every bounded multiset invariant we
+compute, namely:
+\begin{enumerate}
+  \item[\textnormal{(i)}] the combinatorial type $\mathrm{L1}$ and the
+        vertex--facet pairing data $\mathrm{Lpm}$;
+  \item[\textnormal{(ii)}] the arithmetic decoration $\mathrm{Lar}$ (Smith normal
+        forms of the vertex and normal matrices);
+  \item[\textnormal{(iii)}] the unsigned chirotope $\mathrm{Lbr}$ (multiset of
+        bracket magnitudes); and --- most strikingly ---
+  \item[\textnormal{(iv)}] the \emph{signed} chirotope $\mathrm{Los}$ (the joint
+        sign-and-magnitude integer-bracket multiset, color-keyed, up to vertex
+        relabeling and global reorientation).
+\end{enumerate}
+Consequently no layer of~\eqref{eq:keylayers} separates them: they are an
+irreducible residue of the entire \emph{permutation-invariant} Gale datum.
+\end{theorem}
+
+\begin{remark}[Reading the hard core: where the program's completeness claim is
+and is not literal]\label{rmk:hardcore}
+Theorem~\ref{thm:galerefine} and Remark~\ref{rmk:galeprogram} state that the pair
+$(\chi_B,\text{decoration})$ is a \emph{complete} $GL(5,\mathbb Z)$-invariant.
+Theorem~\ref{thm:hardcore} pins down the fine print: completeness holds for the
+chirotope taken \emph{up to a canonical relabeling} (the full ordered
+Grassmann--Plücker sign data), but \emph{not} for any
+\emph{permutation-invariant multiset summary} of it. Two
+$GL(5,\mathbb Z)$-inequivalent configurations can share the same oriented matroid
+\emph{as an unlabeled object} together with all elementary-divisor data; what
+distinguishes them is the realization \emph{up to a canonical labeling}, and
+recovering that canonical labeling is exactly the
+$GL(5,\mathbb Z)$-isomorphism problem the normal form $\beta$ solves. The
+$85$-fibre residue is the concrete, quantified appearance of the
+``within-chirotope'' residue anticipated abstractly in
+Remark~\ref{rmk:ceiling}; we find it is small ($9.6\times10^{-7}$) but
+\emph{nonempty even after the full signed oriented matroid}, and present already
+at $g=2$. (A methodological caution: a naive signed-bracket tally taken under the
+\emph{stored NF's own coordinate order} appears to separate $37$ of the $42$
+groups, but that order is not $GL$-invariant, so the apparent separation is an
+artifact of comparing two different representatives, not a genuine
+oriented-matroid difference --- under any honestly invariant signed-chirotope
+statistic the groups do \emph{not} separate.)
+\end{remark}
+
+\begin{remark}[A complete, validated classifier with a $10^{-6}$ canonical-form
+core]\label{rmk:completeclassifier}
+The verification closes into a complete pipeline that uses the expensive
+canonicalization only where it is provably necessary:
+\[
+  \text{(cheap key }\mathrm{free}\oplus\mathrm{L1}\oplus\mathrm{Lpm}\text{)}
+  \ +\ \text{(exact } GL(5,\mathbb Z)\text{-isomorphism resolver on the residual
+  candidates).}
+\]
+The exact resolver --- a finite color-restricted unimodular search, the
+realization of stage S6 without invoking PALP --- splits the $42$ over-merged
+classes into their $85$ constituent fibres, making the combined classifier
+\emph{injective on all $88{,}588{,}676$ fibres}. Thus the empirical verdict
+matches the theory exactly: the Gale datum plus one hull replaces $\beta$ for all
+but a $\sim\!10^{-6}$ fraction, and that fraction is the irreducible
+lattice-isomorphism core of Theorem~\ref{thm:obstruction}, here exhibited,
+counted, and resolved. (Encoding note, consistent with
+Remark~\ref{rmk:galecalib-read}: \texttt{nf\_vertices} is the $d\times n_v$ PALP
+matrix stored column-major \texttt{int32}; the true vertex and facet counts are
+\texttt{bh\_mv} and \texttt{bh\_nv}, while \texttt{vertex\_count}/%
+\texttt{facet\_count} are corrupt and were not used.)
+\end{remark}
+
+%==============================================================
 \section{Key references}
 %==============================================================
 \begin{itemize}
@@ -499,7 +2593,12 @@ not covered by Theorem~\ref{thm:ks}, hence frontier work.
         Lattice Polytopes \dots,'' \emph{Comput.\ Phys.\ Commun.}\
         \textbf{157}, 87--106 (arXiv:math/0204356): the software computing
         $GL(d,\mathbb{Z})$ normal forms used in step (5) and in
-        \texttt{refpoly-5d}.
+        \texttt{refpoly-5d}. The source in \texttt{PALP/} is the object of
+        Section~\ref{sec:algo}: weight/CWS enumeration (\texttt{cws.c}),
+        polytope construction (\texttt{Coord.c}), normal forms
+        (\texttt{Polynf.c}), and subpolytope/database handling
+        (\texttt{class.c}, \texttt{Subpoly.c}, \texttt{Subdb.c}); the
+        \texttt{CWS} struct and size constants are in \texttt{Global.h}.
   \item \textbf{Batyrev (1994)}, ``Dual polyhedra and mirror symmetry
         \dots,'' \emph{J.\ Algebraic Geom.}\ \textbf{3}, 493--535
         (arXiv:alg-geom/9310003): reflexive polytopes, polar duality, and
@@ -511,6 +2610,36 @@ not covered by Theorem~\ref{thm:ks}, hence frontier work.
         containing a fixed number of interior points in a sublattice,''
         \emph{Canad.\ J.\ Math.}\ \textbf{43}, 1022--1035: finiteness up to
         $GL(d,\mathbb{Z})$, Theorem~\ref{thm:finite}.
+  \item \textbf{Sch\"oller--Skarke (2019)}, ``All Weight Systems for
+        Calabi--Yau Fourfolds from Reflexivity,'' \emph{Commun.\ Math.\ Phys.}\
+        (arXiv:1808.02422): the $322\,383\,760\,930$ IP /
+        $185\,269\,499\,015$ reflexive single weight systems for \emph{maximal}
+        reflexive $5$-polytopes, the dataset underlying
+        Section~\ref{sec:fibre} (Remarks~\ref{rmk:datasetnumbers},
+        \ref{rmk:fibredata}) and Theorem~\ref{thm:maxdeg5}.
+  \item \textbf{Conrads (2002)}, ``Weighted projective spaces and reflexive
+        simplices,'' \emph{Manuscripta Math.}\ \textbf{107}, 215--227: the
+        classification of reflexive simplices by weight systems modulo an
+        explicit finite equivalence --- the exact predictor for the simplex
+        sub-class (Theorem~\ref{thm:dichotomy}(S),
+        Section~\ref{sec:fibre-sieve}).
+  \item \textbf{Gelfand--Kapranov--Zelevinsky (1994)}, \emph{Discriminants,
+        Resultants, and Multidimensional Determinants}, Birkh\"auser: the
+        secondary polytope / secondary fan and the $A$-discriminant
+        underpinning the Gale-dual program of Section~\ref{sec:fibre-gale}
+        (Remark~\ref{rmk:surrounding}).
+  \item \textbf{Gr\"unbaum (2003)}, \emph{Convex Polytopes}, 2nd ed., Springer
+        (GTM 221): Gale diagrams and the classification of polytopes with few
+        vertices ($d{+}2$, $d{+}3$) --- the $g\le2$ strata of
+        Theorem~\ref{thm:ceiling}.
+  \item \textbf{Ziegler (1995)}, \emph{Lectures on Polytopes}, Springer
+        (GTM 152): Gale transforms/diagrams and the Gale evaluation criterion
+        for faces (Proposition~\ref{prop:wsgale},
+        Definition~\ref{def:galedatum}).
+  \item \textbf{Bj\"orner--Las Vergnas--Sturmfels--White--Ziegler (1999)},
+        \emph{Oriented Matroids}, 2nd ed., Cambridge: chirotopes, realizability,
+        and the combinatorial backbone of the refinement
+        chain~\eqref{eq:refinechain} (Theorem~\ref{thm:galerefine}).
 \end{itemize}
 
 \end{document}
