@@ -1,0 +1,18 @@
+{
+  "by_host": {
+    "rci-head:x86_64": {
+      "host": "rci-head:x86_64",
+      "python": "3.10.12",
+      "n_ws": 10000,
+      "nf_throughput_ws_per_s": 11201.731200339867,
+      "hash_MBps": {
+        "blake2b128": 602.7970001279818,
+        "sha256": 948.1384070009934
+      },
+      "algos": [
+        "blake2b128",
+        "sha256"
+      ]
+    }
+  }
+}
