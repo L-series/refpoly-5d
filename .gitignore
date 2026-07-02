@@ -1,3 +1,7 @@
+# Python
+__pycache__/
+*.pyc
+
 # LaTeX compilation artifacts
 *.aux
 *.log
