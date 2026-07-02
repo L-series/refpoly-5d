@@ -24,9 +24,11 @@ SRC = REPO_ROOT.parent / "process-polytopes" / "samples" / "sample-100k.txt"
 
 SMALL_OUT = REPO_ROOT / "tests" / "fixtures" / "corpus_small.txt"
 BENCH_OUT = REPO_ROOT / "bench" / "corpus" / "corpus_10k.txt"
+BENCH_LARGE_OUT = REPO_ROOT / "bench" / "corpus" / "corpus_100k.txt"
 
 SMALL_N = 400
 BENCH_N = 10000
+BENCH_LARGE_N = 100000  # the full KS sample; unique WS tiled by the scaling bench
 
 _M_RE = re.compile(r"M:(\d+)")
 
@@ -51,6 +53,12 @@ def main() -> None:
     bench = [ws_line(r) for r in rows[:BENCH_N]]
     BENCH_OUT.parent.mkdir(parents=True, exist_ok=True)
     BENCH_OUT.write_text("\n".join(bench) + "\n")
+
+    # large bench corpus: the full sample, used (tiled) by the classifier
+    # scaling benchmark to build compute-bound multi-million-row inputs.
+    large = [ws_line(r) for r in rows[:BENCH_LARGE_N]]
+    BENCH_LARGE_OUT.write_text("\n".join(large) + "\n")
+    print(f"wrote {len(large)} lines -> {BENCH_LARGE_OUT}")
 
     # small corpus: stratify by point count, take an even stride across the
     # size-sorted list so tiny and large polytopes are both represented.
