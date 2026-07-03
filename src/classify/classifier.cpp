@@ -99,6 +99,15 @@ struct Config {
     bool        benchmark_only  = false;
     int64_t     benchmark_rows  = 0;   /* 0 = all rows in first file */
     int64_t     max_rows_per_file = 0; /* 0 = unlimited               */
+    /* Spill-run mode: instead of accumulating one ever-growing global map
+       (infeasible at full non-reflexive scale — ~20B uniques), process each
+       file (or a small batch), write an independent SORTED run to disk, and
+       RESET the map.  All cross-file/cross-node dedup is deferred to --merge.
+       Keeps peak RAM ≈ one run's uniques and removes the global-map bottleneck. */
+    bool        spill_runs      = false;
+    std::string runs_dir;              /* where sorted runs are written (default: checkpoint_dir) */
+    int         files_per_run   = 1;   /* files accumulated per spilled run */
+    std::string run_tag         = "run"; /* filename prefix for run files */
     GeometryBackendKind backend_kind = GeometryBackendKind::Cpu;
     int         cuda_device     = slurm_default_cuda_device();
 };
@@ -784,6 +793,7 @@ static void write_checkpoint(const PolytopeMap &map, const fs::path &path) {
     std::cerr << "\n  Checkpoint: " << n << " entries → " << path.string() << "\n";
 }
 
+
 static void read_checkpoint(PolytopeMap &map, const fs::path &path) {
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) return;
@@ -1333,6 +1343,59 @@ static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
  *  Main processing loop: process one parquet file
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Diagnostic perf knobs (investigation only; leave unset in production):
+     PALP_BENCH_NOSTORE=1  compute NF + hash but skip the hash-map insert
+     PALP_BENCH_NOHASH=1   (with NOSTORE) also skip hashing — raw PALP NF only
+   These isolate whether the fat 320-byte map inserts (random GB-scale memory
+   traffic) or the PALP NF compute itself is the scaling bottleneck. */
+static bool bench_nostore() { static bool v = std::getenv("PALP_BENCH_NOSTORE") != nullptr; return v; }
+static bool bench_nohash()  { static bool v = std::getenv("PALP_BENCH_NOHASH")  != nullptr; return v; }
+static volatile uint64_t g_bench_sink = 0;
+
+/* ── Parallel sort of a flat vector (chunk-sort + cascading inplace_merge) ── */
+template <class T, class Cmp>
+static void parallel_sort_vec(std::vector<T> &v, Cmp cmp, int n_threads) {
+    int64_t nn = static_cast<int64_t>(v.size());
+    if (nn < 2) return;
+    int n_chunks = std::min(std::max(1, n_threads),
+                            std::max(1, static_cast<int>(nn / 1000)));
+    int64_t chunk_size = (nn + n_chunks - 1) / n_chunks;
+    {
+        std::vector<std::thread> ts;
+        for (int t = 0; t < n_chunks; t++) {
+            int64_t b = static_cast<int64_t>(t) * chunk_size;
+            int64_t e = std::min(b + chunk_size, nn);
+            if (b < e) ts.emplace_back([&v, b, e, &cmp]() {
+                std::sort(v.begin() + b, v.begin() + e, cmp); });
+        }
+        for (auto &th : ts) th.join();
+    }
+    for (int64_t width = chunk_size; width < nn; width *= 2) {
+        std::vector<std::thread> ts;
+        for (int64_t left = 0; left < nn; left += 2 * width) {
+            int64_t mid   = std::min(left + width,     nn);
+            int64_t right = std::min(left + 2 * width, nn);
+            if (mid < right) ts.emplace_back([&v, left, mid, right, &cmp]() {
+                std::inplace_merge(v.begin() + left, v.begin() + mid,
+                                   v.begin() + right, cmp); });
+        }
+        for (auto &th : ts) th.join();
+    }
+}
+
+/* ── Write an already-key-sorted vector of MergeRecords as a run (.ckpt) ──── */
+static void write_records_run(const std::vector<MergeRecord> &recs,
+                              const fs::path &path) {
+    fs::path tmp = path; tmp += ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary);
+        write_checkpoint_header(f, static_cast<uint64_t>(recs.size()));
+        f.write(reinterpret_cast<const char *>(recs.data()),
+                static_cast<std::streamsize>(recs.size() * sizeof(MergeRecord)));
+    }
+    fs::rename(tmp, path);
+}
+
 static void process_file(const fs::path &input_path,
                          PolytopeMap &global_map,
                          std::mutex &global_mtx,
@@ -1350,6 +1413,8 @@ static void process_file(const fs::path &input_path,
 
     int64_t n = static_cast<int64_t>(rows.size());
     stats.total_cws.fetch_add(n, std::memory_order_relaxed);
+    const bool nostore = bench_nostore();
+    const bool nohash  = bench_nohash();
 
     std::cerr << "\n  " << input_path.filename().string()
               << ": " << n / 1'000'000.0 << "M rows, read in "
@@ -1411,6 +1476,15 @@ static void process_file(const fs::path &input_path,
                         continue;
                     }
 
+                    if (nostore) {
+                        if (!nohash) {
+                            Hash128 k = hash_normal_form(result.nf, result.dim, result.nv);
+                            g_bench_sink ^= k.lo;   /* defeat dead-code elimination */
+                        }
+                        stats.processed_cws.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+
                     Hash128 key = hash_normal_form(result.nf, result.dim, result.nv);
 
                     auto it = local_maps[t].find(key);
@@ -1457,6 +1531,143 @@ static void process_file(const fs::path &input_path,
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ *  Append-mode per-file processing → one sorted run (throughput path)
+ *
+ *  The compute loop appends {hash, row-index, geometry} sequentially instead
+ *  of inserting into a per-thread hash map.  Sequential append is cache- and
+ *  bandwidth-friendly (the random GB-scale hash-map inserts of process_file
+ *  were the dominant scaling bottleneck — ~2.7x slower on a full socket).
+ *  Dedup is deferred: after compute we sort by (hash, idx) and collapse equal
+ *  hashes into one MergeRecord (representative = smallest row index, count =
+ *  group size), then write a sorted run.  Output is byte-for-byte equivalent
+ *  to the map path's run (same hash set + counts; representative is the first
+ *  occurrence by row index, which is deterministic).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+struct HashRec {
+    Hash128 key;
+    int64_t idx;      /* row index within this file (representative source)   */
+    int16_t nv, ne;   /* vertex / facet counts from the PALP NF result        */
+    int32_t np;       /* point count                                          */
+};
+
+static void process_file_to_run(const fs::path &input_path,
+                                const fs::path &run_path,
+                                Stats &stats, int n_threads,
+                                GeometryBackendKind backend_kind, int cuda_device,
+                                int64_t max_rows = 0)
+{
+    auto t0 = std::chrono::steady_clock::now();
+    std::vector<CWSRow> rows = read_parquet_file(input_path, max_rows);
+    double read_time = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+
+    int64_t n = static_cast<int64_t>(rows.size());
+    stats.total_cws.fetch_add(n, std::memory_order_relaxed);
+    std::cerr << "\n  " << input_path.filename().string()
+              << ": " << n / 1'000'000.0 << "M rows, read in "
+              << std::fixed << std::setprecision(1) << read_time << "s\n";
+
+    bool cuda_or_auto = backend_kind != GeometryBackendKind::Cpu;
+    int actual_threads = cuda_or_auto
+        ? std::min(n_threads, std::max(1, static_cast<int>(n)))
+        : std::min(n_threads, std::max(1, (int)((n + 999) / 1000)));
+    int64_t block_size = cuda_or_auto ? 32 : 1024;
+    int64_t n_blocks = (n + block_size - 1) / block_size;
+    std::atomic<int64_t> next_block{0};
+
+    /* Per-thread append buffers (no shared structure in the hot loop). */
+    std::vector<std::vector<HashRec>> tbufs(actual_threads);
+    for (auto &v : tbufs)
+        v.reserve(static_cast<size_t>(n / actual_threads) + 1024);
+
+    ThreadPool pool(actual_threads);
+    std::vector<std::future<void>> futures;
+    for (int t = 0; t < actual_threads; t++) {
+        futures.push_back(pool.enqueue([&, t] {
+            std::unique_ptr<GeometryBackend> backend =
+                make_geometry_backend(backend_kind, cuda_device);
+            std::vector<PalpNFResult> block_results(static_cast<std::size_t>(block_size));
+            std::vector<HashRec> &buf = tbufs[t];
+            for (;;) {
+                int64_t b = next_block.fetch_add(1, std::memory_order_relaxed);
+                if (b >= n_blocks) break;
+                int64_t bstart = b * block_size;
+                int64_t bend = std::min(bstart + block_size, n);
+                backend->compute_batch(&rows[bstart].cws, sizeof(CWSRow),
+                                       static_cast<std::size_t>(bend - bstart),
+                                       block_results.data());
+                for (int64_t i = bstart; i < bend; i++) {
+                    const PalpNFResult &res = block_results[static_cast<std::size_t>(i - bstart)];
+                    if (!res.ok) {
+                        stats.failed_cws.fetch_add(1, std::memory_order_relaxed);
+                        stats.processed_cws.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+                    Hash128 key = hash_normal_form(res.nf, res.dim, res.nv);
+                    buf.push_back(HashRec{key, i, static_cast<int16_t>(res.nv),
+                                          static_cast<int16_t>(res.ne),
+                                          static_cast<int32_t>(res.np)});
+                    stats.processed_cws.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }));
+    }
+    bool all_done = false;
+    while (!all_done) {
+        all_done = true;
+        for (auto &f : futures)
+            if (f.wait_for(std::chrono::milliseconds(500)) != std::future_status::ready)
+                all_done = false;
+        stats.print_progress();
+    }
+    for (auto &f : futures) f.get();
+
+    /* Concatenate per-thread buffers. */
+    size_t tot = 0; for (auto &v : tbufs) tot += v.size();
+    std::vector<HashRec> all; all.reserve(tot);
+    for (auto &v : tbufs) {
+        all.insert(all.end(), v.begin(), v.end());
+        std::vector<HashRec>().swap(v);   /* free promptly */
+    }
+
+    /* Sort by (hash, idx): groups equal hashes; idx tiebreak makes the
+       representative deterministic (smallest row index). */
+    parallel_sort_vec(all, [](const HashRec &a, const HashRec &b) {
+        if (a.key.hi != b.key.hi) return a.key.hi < b.key.hi;
+        if (a.key.lo != b.key.lo) return a.key.lo < b.key.lo;
+        return a.idx < b.idx;
+    }, n_threads);
+
+    /* Collapse equal-hash groups into one MergeRecord (count = group size). */
+    std::vector<MergeRecord> out;
+    for (size_t i = 0; i < all.size();) {
+        size_t j = i + 1;
+        while (j < all.size() && all[j].key == all[i].key) j++;
+        const CWSRow &row = rows[all[i].idx];
+        MergeRecord rec{};
+        rec.key = all[i].key;
+        PolytopeInfo &info = rec.info;
+        info.count = static_cast<uint64_t>(j - i);
+        fill_first_cws_info(info, row);
+        info.vertex_count     = all[i].nv;
+        info.facet_count      = all[i].ne;
+        info.point_count      = all[i].np;
+        info.dual_point_count = row.dual_point_count;
+        info.h11 = static_cast<int16_t>(row.h11);
+        info.h12 = static_cast<int16_t>(row.h12);
+        info.h13 = static_cast<int16_t>(row.h13);
+        out.push_back(rec);
+        i = j;
+    }
+
+    write_records_run(out, run_path);
+    std::cerr << "\n  Run: " << out.size() << " sorted entries (from "
+              << n / 1'000'000.0 << "M rows) → " << run_path.string() << "\n";
+    stats.files_done.fetch_add(1, std::memory_order_relaxed);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  *  Get current RSS in bytes (Linux-specific)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -1489,7 +1700,13 @@ static void usage(const char *argv0) {
         << " [--assume-sorted] Skip Phase 1 sort (all shards already sorted)\n"
         << " [--max-rows <n>]  Limit rows processed per file (for testing)\n"
         << " [--benchmark <n>] Benchmark mode: process N rows from first file\n"
-        << " [--merge <dir>]   Merge checkpoint shards from <dir>\n"
+        << " [--spill-runs]    Per-file sorted-run mode: write an independent sorted\n"
+        << "                   run per file (or --files-per-run batch) and reset the\n"
+        << "                   map; bounded RAM, no global accumulation. Dedup via --merge.\n"
+        << " [--runs-dir <d>]  Where to write spilled runs (default: checkpoint dir)\n"
+        << " [--files-per-run n] Files accumulated per spilled run (default: 1)\n"
+        << " [--run-tag <s>]   Filename prefix for run files (default: run)\n"
+        << " [--merge <dir>]   Merge checkpoint/run shards from <dir>\n"
         << "\n"
         << "Examples:\n"
         << "  # Process all files\n"
@@ -1521,6 +1738,10 @@ int main(int argc, char **argv) {
         else if (a == "--assume-sorted")               cfg.assume_sorted  = true;
         else if (a == "--non-reflexive")               cfg.non_reflexive  = true;
         else if (a == "--max-rows"    && i+1 < argc) cfg.max_rows_per_file = std::stoll(argv[++i]);
+        else if (a == "--spill-runs")                  cfg.spill_runs     = true;
+        else if (a == "--runs-dir"      && i+1 < argc) cfg.runs_dir       = argv[++i];
+        else if (a == "--files-per-run" && i+1 < argc) cfg.files_per_run  = std::stoi(argv[++i]);
+        else if (a == "--run-tag"       && i+1 < argc) cfg.run_tag        = argv[++i];
         else if (a == "--benchmark"   && i+1 < argc) {
             cfg.benchmark_only = true;
             cfg.benchmark_rows = std::stoll(argv[++i]);
@@ -1554,6 +1775,15 @@ int main(int argc, char **argv) {
         cfg.n_threads = static_cast<int>(std::thread::hardware_concurrency());
     if (cfg.checkpoint_dir.empty())
         cfg.checkpoint_dir = cfg.output_dir + "/checkpoints";
+    if (cfg.spill_runs) {
+        if (cfg.runs_dir.empty()) cfg.runs_dir = cfg.checkpoint_dir;
+        if (cfg.files_per_run < 1) cfg.files_per_run = 1;
+        if (cfg.resume) {
+            std::cerr << "  Note: --resume is ignored in --spill-runs mode "
+                         "(each run is independent; dedup happens in --merge)\n";
+            cfg.resume = false;
+        }
+    }
 
     if (cfg.backend_kind == GeometryBackendKind::Cuda) {
         std::string reason;
@@ -1597,6 +1827,7 @@ int main(int argc, char **argv) {
 
     fs::create_directories(cfg.output_dir);
     fs::create_directories(cfg.checkpoint_dir);
+    if (cfg.spill_runs) fs::create_directories(cfg.runs_dir);
 
     std::cerr << "=== Polytope Classifier ===\n"
               << "Input:      " << cfg.input_dir << "\n"
@@ -1628,7 +1859,12 @@ int main(int argc, char **argv) {
     std::mutex global_mtx;
 
     /* Resume from checkpoint if requested */
-    if (cfg.resume) {
+    if (cfg.spill_runs) {
+        /* Fresh start: remove any stale runs so restarting this file range is
+           idempotent (every run is fully regenerated from its source files). */
+        for (auto &e : fs::directory_iterator(cfg.runs_dir))
+            if (e.path().extension() == ".ckpt") fs::remove(e.path());
+    } else if (cfg.resume) {
         /* Load ALL .ckpt files from the checkpoint directory.  In a properly
            managed run there should be exactly one (the latest full snapshot),
            but we load all in case of manual checkpoint management. */
@@ -1655,11 +1891,34 @@ int main(int argc, char **argv) {
 
     auto t_total = std::chrono::steady_clock::now();
     fs::path prev_checkpoint;   /* track previous checkpoint for cleanup */
+    int runs_written = 0;       /* spilled runs (spill mode)                */
 
     for (size_t fi = 0; fi < input_files.size(); fi++) {
         int64_t max_rows = (cfg.benchmark_only && cfg.benchmark_rows > 0)
                            ? cfg.benchmark_rows
                            : cfg.max_rows_per_file;
+
+        int base = cfg.name_offset >= 0 ? cfg.name_offset
+                 : cfg.start_file  >= 0 ? cfg.start_file : 0;
+        int global_idx = base + static_cast<int>(fi);
+
+        if (cfg.spill_runs) {
+            /* Append-mode throughput path: each file → one independent SORTED
+               run (append {hash,idx} in the hot loop, sort + collapse at the
+               end).  No global map, peak RAM bounded to one file.  Cross-file
+               and cross-node dedup are deferred to --merge. */
+            char buf[80];
+            std::snprintf(buf, sizeof(buf), "%s-%05d.ckpt",
+                          cfg.run_tag.c_str(), global_idx);
+            process_file_to_run(input_files[fi], fs::path(cfg.runs_dir) / buf,
+                                stats, cfg.n_threads, cfg.backend_kind,
+                                cfg.cuda_device, max_rows);
+            runs_written++;
+            size_t rss = get_rss_bytes();
+            std::cerr << "  RSS: " << rss / (1024*1024) << " MB"
+                      << "  runs: " << runs_written << "\n";
+            continue;
+        }
 
         process_file(input_files[fi], global_map, global_mtx, stats,
                  cfg.n_threads, cfg.backend_kind, cfg.cuda_device, max_rows);
@@ -1669,13 +1928,10 @@ int main(int argc, char **argv) {
         std::cerr << "\n  RSS: " << rss / (1024*1024) << " MB"
                   << "  Map size: " << global_map.size() << "\n";
 
-        /* Periodic checkpoint — each checkpoint is a FULL snapshot of the
-           global map, so we only need to keep the latest one. */
         if ((fi + 1) % 10 == 0 || fi == input_files.size() - 1) {
+            /* Periodic checkpoint — each checkpoint is a FULL snapshot of the
+               global map, so we only need to keep the latest one. */
             char buf[64];
-            int base = cfg.name_offset >= 0 ? cfg.name_offset
-                     : cfg.start_file  >= 0 ? cfg.start_file : 0;
-            int global_idx = base + static_cast<int>(fi);
             std::snprintf(buf, sizeof(buf), "checkpoint-%04d.ckpt", global_idx);
             fs::path ckpt_path = fs::path(cfg.checkpoint_dir) / buf;
             write_checkpoint(global_map, ckpt_path);
@@ -1690,6 +1946,37 @@ int main(int argc, char **argv) {
 
     double total_secs = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t_total).count();
+
+    /* ── Spill-runs finalization ─────────────────────────────────────────── */
+    if (cfg.spill_runs) {
+        int64_t p = stats.processed_cws.load();
+        int64_t f = stats.failed_cws.load();
+        std::cerr << "\n\n=== Results (spill-runs) ===\n"
+                  << "Total CWS processed:   " << p << "\n"
+                  << "Failed:                " << f << "\n"
+                  << "Runs written:          " << runs_written
+                  << " → " << cfg.runs_dir << "\n"
+                  << "Total time:            " << std::fixed << std::setprecision(1)
+                  << total_secs << "s (" << total_secs / 60 << " min)\n"
+                  << "Throughput:            " << std::setprecision(0)
+                  << (total_secs > 0 ? p / total_secs : 0) << " CWS/s\n"
+                  << "NOTE: cross-file/cross-node dedup deferred — run --merge over "
+                  << cfg.runs_dir << " (with --assume-sorted; runs are pre-sorted).\n";
+        fs::path summary_path = fs::path(cfg.output_dir) / "summary.json";
+        std::ofstream sf(summary_path);
+        sf << "{\n"
+           << "  \"mode\": \"spill-runs\",\n"
+           << "  \"total_cws\": " << p << ",\n"
+           << "  \"failed_cws\": " << f << ",\n"
+           << "  \"runs_written\": " << runs_written << ",\n"
+           << "  \"total_seconds\": " << total_secs << ",\n"
+           << "  \"throughput_cws_per_sec\": " << (total_secs > 0 ? p / total_secs : 0) << ",\n"
+           << "  \"files_processed\": " << stats.files_done.load() << ",\n"
+           << "  \"threads\": " << cfg.n_threads << "\n"
+           << "}\n";
+        std::cerr << "Done.\n";
+        return 0;
+    }
 
     /* ── Final output ────────────────────────────────────────────────────── */
     /* Accounting invariant check:
