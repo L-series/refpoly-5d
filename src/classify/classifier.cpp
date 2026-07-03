@@ -1551,11 +1551,85 @@ struct HashRec {
     int32_t np;       /* point count                                          */
 };
 
-static void process_file_to_run(const fs::path &input_path,
-                                const fs::path &run_path,
-                                Stats &stats, int n_threads,
-                                GeometryBackendKind backend_kind, int cuda_device,
-                                int64_t max_rows = 0)
+/* Parallel collapse of a (hash,idx)-sorted HashRec array into deduped
+   MergeRecords (one per equal-hash group; representative = smallest idx;
+   count = group size).  Building the fat 320B records single-threaded was a
+   big share of the append path's post-compute overhead.  Two passes (count
+   groups per chunk → prefix-sum offsets → fill) split at group boundaries so
+   chunks are independent and there is no intermediate copy (peak memory is
+   just the output). */
+static std::vector<MergeRecord> collapse_sorted(const std::vector<HashRec> &all,
+                                                const std::vector<CWSRow> &rows,
+                                                int n_threads) {
+    size_t n = all.size();
+    std::vector<MergeRecord> out;
+    if (n == 0) return out;
+
+    int nb = std::min(std::max(1, n_threads), std::max(1, (int)(n / 100000)));
+    std::vector<size_t> starts(nb + 1);
+    starts[0] = 0; starts[nb] = n;
+    for (int k = 1; k < nb; k++) {
+        size_t p = (size_t)((unsigned long long)k * n / (unsigned)nb);
+        while (p > 0 && p < n && all[p].key == all[p - 1].key) p++;
+        starts[k] = p;
+    }
+    for (int k = 1; k <= nb; k++)
+        if (starts[k] < starts[k - 1]) starts[k] = starts[k - 1];
+
+    auto count_groups = [&](size_t b, size_t e) {
+        size_t g = 0;
+        for (size_t i = b; i < e;) {
+            size_t j = i + 1; while (j < e && all[j].key == all[i].key) j++;
+            g++; i = j;
+        }
+        return g;
+    };
+    std::vector<size_t> gcount(nb, 0);
+    {
+        std::vector<std::thread> ts;
+        for (int k = 0; k < nb; k++)
+            ts.emplace_back([&, k] { gcount[k] = count_groups(starts[k], starts[k + 1]); });
+        for (auto &t : ts) t.join();
+    }
+    std::vector<size_t> off(nb + 1, 0);
+    for (int k = 0; k < nb; k++) off[k + 1] = off[k] + gcount[k];
+    out.resize(off[nb]);
+
+    auto fill = [&](int k) {
+        size_t w = off[k];
+        for (size_t i = starts[k]; i < starts[k + 1];) {
+            size_t j = i + 1; while (j < starts[k + 1] && all[j].key == all[i].key) j++;
+            const CWSRow &row = rows[all[i].idx];
+            MergeRecord &rec = out[w++];
+            rec = MergeRecord{};
+            rec.key = all[i].key;
+            PolytopeInfo &info = rec.info;
+            info.count = static_cast<uint64_t>(j - i);
+            fill_first_cws_info(info, row);
+            info.vertex_count     = all[i].nv;
+            info.facet_count      = all[i].ne;
+            info.point_count      = all[i].np;
+            info.dual_point_count = row.dual_point_count;
+            info.h11 = static_cast<int16_t>(row.h11);
+            info.h12 = static_cast<int16_t>(row.h12);
+            info.h13 = static_cast<int16_t>(row.h13);
+            i = j;
+        }
+    };
+    {
+        std::vector<std::thread> ts;
+        for (int k = 0; k < nb; k++) ts.emplace_back(fill, k);
+        for (auto &t : ts) t.join();
+    }
+    return out;
+}
+
+/* Read a file and produce its deduped, key-sorted run records (compute + sort
+   + collapse).  The caller writes the run — typically on a background thread so
+   the 8 GB run-write of file K overlaps the compute of file K+1. */
+static std::vector<MergeRecord> build_run_records(
+        const fs::path &input_path, Stats &stats, int n_threads,
+        GeometryBackendKind backend_kind, int cuda_device, int64_t max_rows = 0)
 {
     auto t0 = std::chrono::steady_clock::now();
     std::vector<CWSRow> rows = read_parquet_file(input_path, max_rows);
@@ -1639,32 +1713,12 @@ static void process_file_to_run(const fs::path &input_path,
         return a.idx < b.idx;
     }, n_threads);
 
-    /* Collapse equal-hash groups into one MergeRecord (count = group size). */
-    std::vector<MergeRecord> out;
-    for (size_t i = 0; i < all.size();) {
-        size_t j = i + 1;
-        while (j < all.size() && all[j].key == all[i].key) j++;
-        const CWSRow &row = rows[all[i].idx];
-        MergeRecord rec{};
-        rec.key = all[i].key;
-        PolytopeInfo &info = rec.info;
-        info.count = static_cast<uint64_t>(j - i);
-        fill_first_cws_info(info, row);
-        info.vertex_count     = all[i].nv;
-        info.facet_count      = all[i].ne;
-        info.point_count      = all[i].np;
-        info.dual_point_count = row.dual_point_count;
-        info.h11 = static_cast<int16_t>(row.h11);
-        info.h12 = static_cast<int16_t>(row.h12);
-        info.h13 = static_cast<int16_t>(row.h13);
-        out.push_back(rec);
-        i = j;
-    }
-
-    write_records_run(out, run_path);
+    /* Collapse equal-hash groups into deduped MergeRecords (parallel). */
+    std::vector<MergeRecord> out = collapse_sorted(all, rows, n_threads);
     std::cerr << "\n  Run: " << out.size() << " sorted entries (from "
-              << n / 1'000'000.0 << "M rows) → " << run_path.string() << "\n";
+              << n / 1'000'000.0 << "M rows)\n";
     stats.files_done.fetch_add(1, std::memory_order_relaxed);
+    return out;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1892,6 +1946,10 @@ int main(int argc, char **argv) {
     auto t_total = std::chrono::steady_clock::now();
     fs::path prev_checkpoint;   /* track previous checkpoint for cleanup */
     int runs_written = 0;       /* spilled runs (spill mode)                */
+    std::thread run_writer;     /* background run-writer (spill mode): writes
+                                   run K while file K+1 computes.  At most one
+                                   outstanding write, so peak extra RAM is one
+                                   run (~8 GB). */
 
     for (size_t fi = 0; fi < input_files.size(); fi++) {
         int64_t max_rows = (cfg.benchmark_only && cfg.benchmark_rows > 0)
@@ -1906,17 +1964,29 @@ int main(int argc, char **argv) {
             /* Append-mode throughput path: each file → one independent SORTED
                run (append {hash,idx} in the hot loop, sort + collapse at the
                end).  No global map, peak RAM bounded to one file.  Cross-file
-               and cross-node dedup are deferred to --merge. */
+               and cross-node dedup are deferred to --merge.  The run-write is
+               handed to a background thread so it overlaps the next file's
+               compute (I/O-bound write vs CPU-bound compute). */
             char buf[80];
             std::snprintf(buf, sizeof(buf), "%s-%05d.ckpt",
                           cfg.run_tag.c_str(), global_idx);
-            process_file_to_run(input_files[fi], fs::path(cfg.runs_dir) / buf,
-                                stats, cfg.n_threads, cfg.backend_kind,
-                                cfg.cuda_device, max_rows);
+            fs::path run_path = fs::path(cfg.runs_dir) / buf;
+            std::vector<MergeRecord> recs = build_run_records(
+                input_files[fi], stats, cfg.n_threads, cfg.backend_kind,
+                cfg.cuda_device, max_rows);
+            /* Ensure the previous run finished writing (bounds outstanding
+               writes to one) before launching the next. */
+            if (run_writer.joinable()) run_writer.join();
+            size_t nrec = recs.size();
+            run_writer = std::thread(
+                [rp = std::move(run_path), rc = std::move(recs)]() mutable {
+                    write_records_run(rc, rp);
+                });
             runs_written++;
             size_t rss = get_rss_bytes();
             std::cerr << "  RSS: " << rss / (1024*1024) << " MB"
-                      << "  runs: " << runs_written << "\n";
+                      << "  run entries: " << nrec
+                      << "  runs: " << runs_written << " (writing async)\n";
             continue;
         }
 
@@ -1943,6 +2013,9 @@ int main(int argc, char **argv) {
             prev_checkpoint = ckpt_path;
         }
     }
+
+    /* Ensure the last background run-write has completed. */
+    if (run_writer.joinable()) run_writer.join();
 
     double total_secs = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t_total).count();
