@@ -74,3 +74,54 @@ Runtime knobs (when built with `--lllfp`): `PALP_WALK` (`fp`/`tri`/`check`),
 | SIMD hull scan | **ON** | **+21–25%** | (on) / `--no-simd` to disable |
 | PGO | off | neutral | `--pgo` |
 | LLL+FP walk | off | net loss | `--lllfp` |
+
+## Multi-core & distributed throughput
+
+The single-thread work above is only part of the story: at full scale the
+classifier is run massively parallel, and there the bottleneck is **not** PALP
+compute. Measured on an AMD EPYC 9554 (2×64 cores) over full 34M-row shards:
+
+| hot loop does… | CWS/s (1 socket, 64 thr) | per-core |
+|---|---:|---:|
+| compute + hash + **hash-map insert** (old default) | 310k | 4.9k |
+| compute + hash, **no insert** | 836k | 13.1k |
+| raw PALP NF only (no hash) | 835k | 13.0k |
+
+So the per-CWS **hash-map insert** — a fat record inserted at random into a
+GB-scale, ever-growing table — saturated memory bandwidth and cost **2.7×**;
+hashing itself is free, and the stats atomics are negligible. On top of that, a
+single process spanning both NUMA sockets lost ~1.7× to cross-socket memory
+traffic (128-thread single process 414k CWS/s vs two socket-bound processes
+715k).
+
+Two changes fix it, and are what the distributed pipeline uses:
+
+### Append / spill-runs mode — `--spill-runs`
+
+Instead of deduping into a growing global map, the hot loop **appends
+`{hash, row-index, geometry}`** to a per-thread buffer (sequential, cache- and
+bandwidth-friendly), then sorts by `(hash, idx)` and collapses equal-hash groups
+into deduped `MergeRecord`s, writing **one sorted run per file**. Peak RAM is
+bounded to a single file; all cross-file/cross-node dedup is deferred to
+`--merge`. The per-file collapse runs in parallel and the run-write is pipelined
+behind the next file's compute. Output is **provably identical** to the in-RAM
+path (same NF-hash set + per-hash counts).
+
+### One process per NUMA socket
+
+Run one `--spill-runs` classifier per socket, `numactl --cpunodebind=N
+--membind=N`, each over half the files. Measured **~1.35M CWS/s/node** (vs 414k
+for the naive single-process map path — **2.5×**) → ~8M/s over 6 nodes, ~4–5 h
+for the full 137B ws-5d.
+
+### Slim record & two-level merge
+
+Because ws-5d is always a single weight system (1×6, degree = Σ), `PolytopeInfo`
+was slimmed to the essentials (**320 B → 80 B**): intermediate runs ~1.4 TB/node
+(was 5.5), merge I/O ~4× less, output a clean 13-column parquet. Dedup is a
+two-level external sort-merge: each node merges its runs into one node-catalogue
+`.ckpt` (`--merge --emit-ckpt`), then a global `--merge` over the node
+catalogues produces the final parquet. See `scripts/slurm/`.
+
+Diagnostic env knobs (perf investigation only): `PALP_BENCH_NOSTORE`,
+`PALP_BENCH_NOHASH`.

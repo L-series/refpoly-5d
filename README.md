@@ -24,11 +24,14 @@ Both variants run through the **same** pipeline:
 3. **Deduplicate** across the full dataset via a work-stealing thread pool and a
    two-phase external sort-merge across distributed compute nodes.
 
-The output is a single deduplicated catalogue of unique polytopes with frequency
-counts and geometry metadata (vertex/facet/point counts). For the **reflexive**
-variant the catalogue also carries the lattice-dual metadata (dual point count,
-Hodge numbers `h11/h12/h13`); for the **non-reflexive** variant — which has no
-lattice dual — those columns are omitted (pass `--non-reflexive`, see below).
+The output is a single deduplicated catalogue of unique polytopes. Each row is
+one polytope: its NF hash (`hash_lo/hi`), frequency `count`, a representative
+weight system (`weight0..5` + `source_index`; ws-5d is always a single 1×6
+weight system, degree = Σweights) and geometry (`vertex_count`, `facet_count`,
+`point_count`). For the **reflexive** variant the catalogue also carries the
+lattice-dual metadata (`dual_point_count`, Hodge numbers `h11/h12/h13`); for the
+**non-reflexive** variant — which has no lattice dual — those columns are
+omitted (pass `--non-reflexive`, see below).
 
 ## Structure
 
@@ -130,6 +133,12 @@ The pipeline is identical for both variants; `--non-reflexive` only drops the
 lattice-dual output columns (`dual_point_count`, `h11/h12/h13`) that are
 undefined for non-reflexive polytopes. `--merge <dir>` (checkpoint merge) takes
 the same flag so its output schema matches.
+
+For the full-scale distributed run, use `--spill-runs` (append mode: bounded
+RAM, no growing dedup map) with one process per NUMA socket, and a two-level
+`--merge` (per-node `--emit-ckpt` catalogues → global merge). The SLURM scripts
+in `scripts/slurm/` orchestrate this; see `docs/OPTIMIZATIONS.md` for the
+throughput rationale.
 
 Concatenate a sharded result dataset into one file with the process tools:
 
