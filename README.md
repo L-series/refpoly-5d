@@ -39,6 +39,7 @@ refpoly-5d/
 │   ├── palp_api.h            thread-safe C wrapper around PALP's NF routines
 │   ├── geometry_backend.*    CPU backend (CUDA path compiled out here)
 │   ├── nf_dump.cpp           diagnostic: prints the NF the classifier computes
+│   ├── add_nf.cpp            enrich unique_polytopes.parquet with NF matrices
 │   ├── CMakeLists.txt        CPU-only build (SIMD/PGO/LLL+FP toggles)
 │   └── build.sh              convenience build wrapper
 ├── src/process/      standalone parquet post-processing tools (no PALP dep)
@@ -134,6 +135,15 @@ Concatenate a sharded result dataset into one file with the process tools:
 
 ```bash
 ./src/process/build/concat_parquet results/parts results/unique_polytopes.parquet
+```
+
+Enrich the catalogue with the actual normal-form vertex matrices (adds an
+`nf_vertices` column, row-major int32 `[5 × vertex_count]`; works on both
+schemas):
+
+```bash
+./src/classify/build/add_nf --input results/unique_polytopes.parquet \
+    --output results/enriched.parquet --threads 32
 ```
 
 ## Testing & benchmarking
