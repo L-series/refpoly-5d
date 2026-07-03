@@ -108,6 +108,8 @@ struct Config {
     std::string runs_dir;              /* where sorted runs are written (default: checkpoint_dir) */
     int         files_per_run   = 1;   /* files accumulated per spilled run */
     std::string run_tag         = "run"; /* filename prefix for run files */
+    bool        emit_ckpt       = false; /* --merge: write .ckpt not parquet (for per-node stage) */
+    std::string merge_tag       = "merged"; /* basename for --emit-ckpt output */
     GeometryBackendKind backend_kind = GeometryBackendKind::Cpu;
     int         cuda_device     = slurm_default_cuda_device();
 };
@@ -181,7 +183,7 @@ struct CheckpointHeader {
     uint64_t count;
 };
 
-static void write_checkpoint_header(std::ofstream &f, uint64_t count) {
+static void write_checkpoint_header(std::ostream &f, uint64_t count) {
     CheckpointHeader header{CHECKPOINT_MAGIC, CHECKPOINT_VERSION,
                             static_cast<uint32_t>(sizeof(MergeRecord)), count};
     f.write(reinterpret_cast<const char *>(&header), sizeof(header));
@@ -940,7 +942,11 @@ static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
                                const fs::path &output_path,
                                int n_threads,
                                bool assume_sorted = false,
-                               bool non_reflexive = false) {
+                               bool non_reflexive = false,
+                               bool emit_ckpt = false) {
+    /* emit_ckpt: write the merged, deduped, key-sorted result as a single
+       binary .ckpt (MergeRecord layout) instead of parquet.  Used for the
+       per-node sort-merge stage so its output can feed the global merge. */
     auto t_total = std::chrono::steady_clock::now();
     const size_t n_shards = shard_paths.size();
 
@@ -1096,13 +1102,31 @@ static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
         .compression(parquet::Compression::ZSTD)
         ->max_row_group_length(1024 * 1024)->build();
 
+    /* ── ckpt output (emit_ckpt): stream MergeRecords to a single .ckpt ─────── */
+    std::ofstream ckpt_out;
+    std::vector<MergeRecord> ckpt_buf;
+    uint64_t ckpt_count = 0;
+    fs::path ckpt_tmp;
+    constexpr size_t CKPT_FLUSH = 1u << 20;
+
+    /* ── parquet output (default) ───────────────────────────────────────────── */
     std::shared_ptr<arrow::io::FileOutputStream> pq_out;
-    ASSIGN_OR_THROW(pq_out, arrow::io::FileOutputStream::Open(output_path.string()));
-    auto pq_r = parquet::arrow::FileWriter::Open(
-        *schema, arrow::default_memory_pool(), pq_out, writer_props);
-    if (!pq_r.ok())
-        throw std::runtime_error("Parquet open: " + pq_r.status().ToString());
-    auto pq_writer = std::move(pq_r).ValueOrDie();
+    std::unique_ptr<parquet::arrow::FileWriter> pq_writer;
+
+    if (emit_ckpt) {
+        ckpt_tmp = output_path; ckpt_tmp += ".tmp";
+        ckpt_out.open(ckpt_tmp, std::ios::binary);
+        if (!ckpt_out) throw std::runtime_error("Cannot open: " + ckpt_tmp.string());
+        write_checkpoint_header(ckpt_out, 0);   /* placeholder; patched at close */
+        ckpt_buf.reserve(CKPT_FLUSH);
+    } else {
+        ASSIGN_OR_THROW(pq_out, arrow::io::FileOutputStream::Open(output_path.string()));
+        auto pq_r = parquet::arrow::FileWriter::Open(
+            *schema, arrow::default_memory_pool(), pq_out, writer_props);
+        if (!pq_r.ok())
+            throw std::runtime_error("Parquet open: " + pq_r.status().ToString());
+        pq_writer = std::move(pq_r).ValueOrDie();
+    }
 
     arrow::UInt64Builder hash_lo_b, hash_hi_b, count_b;
     arrow::Int64Builder  source_b;
@@ -1136,6 +1160,16 @@ static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
         pq_n = 0;
     };
     auto emit = [&](const Hash128 &key, const PolytopeInfo &info) {
+        if (emit_ckpt) {
+            ckpt_buf.push_back(MergeRecord{key, info});
+            if (ckpt_buf.size() >= CKPT_FLUSH) {
+                ckpt_out.write(reinterpret_cast<const char *>(ckpt_buf.data()),
+                    static_cast<std::streamsize>(ckpt_buf.size() * sizeof(MergeRecord)));
+                ckpt_count += ckpt_buf.size();
+                ckpt_buf.clear();
+            }
+            return;
+        }
         CHECK_ARROW(hash_lo_b.Append(key.lo));   CHECK_ARROW(hash_hi_b.Append(key.hi));
         CHECK_ARROW(count_b.Append(info.count));
         CHECK_ARROW(source_b.Append(info.source_index));
@@ -1199,9 +1233,24 @@ static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
         }
     }
 
-    flush_pq();
-    CHECK_ARROW(pq_writer->Close());
-    CHECK_ARROW(pq_out->Close());
+    if (emit_ckpt) {
+        if (!ckpt_buf.empty()) {
+            ckpt_out.write(reinterpret_cast<const char *>(ckpt_buf.data()),
+                static_cast<std::streamsize>(ckpt_buf.size() * sizeof(MergeRecord)));
+            ckpt_count += ckpt_buf.size();
+            ckpt_buf.clear();
+        }
+        ckpt_out.flush();
+        /* Patch the header record count (was written as 0). */
+        ckpt_out.seekp(0);
+        write_checkpoint_header(ckpt_out, ckpt_count);
+        ckpt_out.close();
+        fs::rename(ckpt_tmp, output_path);
+    } else {
+        flush_pq();
+        CHECK_ARROW(pq_writer->Close());
+        CHECK_ARROW(pq_out->Close());
+    }
     readers.clear();
 
     /* ── Cleanup .sorted marker files (data files are kept as-is) ─────── */
@@ -1651,6 +1700,9 @@ static void usage(const char *argv0) {
         << " [--files-per-run n] Files accumulated per spilled run (default: 1)\n"
         << " [--run-tag <s>]   Filename prefix for run files (default: run)\n"
         << " [--merge <dir>]   Merge checkpoint/run shards from <dir>\n"
+        << " [--emit-ckpt]     With --merge: write a single sorted .ckpt (not parquet),\n"
+        << "                   for the per-node stage of a two-level merge\n"
+        << " [--merge-tag <s>] With --merge --emit-ckpt: output basename (default: merged)\n"
         << "\n"
         << "Examples:\n"
         << "  # Process all files\n"
@@ -1691,6 +1743,8 @@ int main(int argc, char **argv) {
             cfg.benchmark_rows = std::stoll(argv[++i]);
         }
         else if (a == "--merge"       && i+1 < argc) merge_dir          = argv[++i];
+        else if (a == "--emit-ckpt")                   cfg.emit_ckpt      = true;
+        else if (a == "--merge-tag"   && i+1 < argc) cfg.merge_tag      = argv[++i];
         else if (a == "-h" || a == "--help") { usage(argv[0]); return 0; }
         else { std::cerr << "Unknown option: " << a << "\n"; usage(argv[0]); return 1; }
     }
@@ -1706,8 +1760,12 @@ int main(int argc, char **argv) {
         std::sort(shards.begin(), shards.end());
         if (shards.empty()) { std::cerr << "No .ckpt files in " << merge_dir << "\n"; return 1; }
         fs::create_directories(cfg.output_dir);
-        merge_checkpoints(shards, fs::path(cfg.output_dir) / "unique_polytopes.parquet",
-                          cfg.n_threads, cfg.assume_sorted, cfg.non_reflexive);
+        fs::path out = cfg.emit_ckpt
+            ? fs::path(cfg.output_dir) / (cfg.merge_tag + ".ckpt")
+            : fs::path(cfg.output_dir) / "unique_polytopes.parquet";
+        merge_checkpoints(shards, out, cfg.n_threads, cfg.assume_sorted,
+                          cfg.non_reflexive, cfg.emit_ckpt);
+        std::cerr << "Merge output: " << out.string() << "\n";
         return 0;
     }
 
