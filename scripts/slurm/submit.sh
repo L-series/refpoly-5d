@@ -28,7 +28,7 @@ export VARIANT="${VARIANT:-non-reflexive}"
 export TOTAL_FILES="${TOTAL_FILES:-4000}"
 export CHUNKS="${CHUNKS:-6}"          # nodes to use (6 up now; set 7 when healthy)
 export BATCH="${BATCH:-25}"           # shards per download/classify/delete cycle
-export THREADS="${THREADS:-128}"      # cores per node
+export THREADS="${THREADS:-128}"      # cores per node (split across NUMA sockets)
 export PARTITION="${PARTITION:-all}"
 export LOCAL_ROOT="${LOCAL_ROOT:-/local/edih210/ahatz01}"
 export CLASSIFIER="${CLASSIFIER:-$REPO_ROOT/src/classify/build/classifier}"
@@ -54,16 +54,16 @@ if [[ -n "${HF_TOKEN:-}" ]]; then
 else
   echo "WARNING: HF_TOKEN unset — anonymous downloads (public dataset; may rate-limit)"
 fi
-mkdir -p "$SHARED_ROOT"/{logs,status,checkpoints}
+mkdir -p "$SHARED_ROOT"/{logs,status,catalogues}
 
 cat <<CFG
 === refpoly-5d distributed classification ===
 run id      : $RUN_ID
 variant     : $VARIANT   files: $TOTAL_FILES
 nodes/chunks: $CHUNKS  (~$(( TOTAL_FILES / CHUNKS )) shards each)  batch: $BATCH
-threads/node: $THREADS   partition: $PARTITION
+threads/node: $THREADS  (one classifier per NUMA socket)  partition: $PARTITION
 local scratch: $LOCAL_ROOT/$RUN_ID
-shared out  : $SHARED_ROOT
+shared out  : $SHARED_ROOT  (per-node catalogues → final/unique_polytopes.parquet)
 HF auth     : $([[ -n "${HF_TOKEN:-}" ]] && echo yes || echo no)
 CFG
 

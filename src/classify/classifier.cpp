@@ -1862,10 +1862,12 @@ int main(int argc, char **argv) {
 
     /* Resume from checkpoint if requested */
     if (cfg.spill_runs) {
-        /* Fresh start: remove any stale runs so restarting this file range is
-           idempotent (every run is fully regenerated from its source files). */
-        for (auto &e : fs::directory_iterator(cfg.runs_dir))
-            if (e.path().extension() == ".ckpt") fs::remove(e.path());
+        /* No cleanup: runs accumulate in runs_dir across invocations (the
+           streaming worker calls the classifier once per batch/socket into a
+           shared runs dir).  Each run is uniquely named by --run-tag + the
+           file's global index and written atomically (.tmp then rename), so
+           re-running a range overwrites exactly its own runs and never clobbers
+           another batch's or socket's.  A clean slate = a fresh runs_dir. */
     } else if (cfg.resume) {
         /* Load ALL .ckpt files from the checkpoint directory.  In a properly
            managed run there should be exactly one (the latest full snapshot),

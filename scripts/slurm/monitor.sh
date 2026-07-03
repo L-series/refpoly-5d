@@ -38,8 +38,8 @@ show() {
       "$total_done" "$total_files" $(( 100 * total_done / total_files ))
   fi
   local nck
-  nck=$(ls -1 "$SHARED_ROOT"/checkpoints/*.ckpt 2>/dev/null | wc -l)
-  echo "--- published node checkpoints: $nck ---"
+  nck=$(ls -1 "$SHARED_ROOT"/catalogues/*.ckpt 2>/dev/null | wc -l)
+  echo "--- published node catalogues: $nck ---"
   if [[ -f "$SHARED_ROOT/final/unique_polytopes.parquet" ]]; then
     echo "--- FINAL result present: $SHARED_ROOT/final/unique_polytopes.parquet ---"
   fi
