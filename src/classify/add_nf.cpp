@@ -245,18 +245,21 @@ static std::vector<InputRow> extract_input_rows(
             weight[r][c] = get_i32("first_weight" + std::to_string(r) + "_" + std::to_string(c));
 
     bool combined_schema = first_nw && first_N && degree[0] && weight[0][0];
-    const int32_t  *w0  = get_i32("first_weight0");
-    const int32_t  *w1  = get_i32("first_weight1");
-    const int32_t  *w2  = get_i32("first_weight2");
-    const int32_t  *w3  = get_i32("first_weight3");
-    const int32_t  *w4  = get_i32("first_weight4");
-    const int32_t  *w5  = get_i32("first_weight5");
+    /* Single weight system: slim schema uses weight0..5; older outputs used
+       first_weight0..5.  Accept either. */
+    auto get_wcol = [&](int i) {
+        const int32_t *p = get_i32("weight" + std::to_string(i));
+        if (!p) p = get_i32("first_weight" + std::to_string(i));
+        return p;
+    };
+    const int32_t  *w0 = get_wcol(0), *w1 = get_wcol(1), *w2 = get_wcol(2);
+    const int32_t  *w3 = get_wcol(3), *w4 = get_wcol(4), *w5 = get_wcol(5);
 
     if (!vc)
         throw std::runtime_error("Input parquet missing required vertex_count column");
     if (!combined_schema && (!w0 || !w1 || !w2 || !w3 || !w4 || !w5))
         throw std::runtime_error(
-            "Input parquet missing combined replay columns and legacy first_weight0..5 columns");
+            "Input parquet missing combined replay columns and weight0..5 columns");
 
     for (int64_t i = 0; i < n; i++) {
         std::memset(&rows[i].cws, 0, sizeof(rows[i].cws));

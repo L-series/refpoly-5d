@@ -136,22 +136,22 @@ struct Hash128Hasher {
  *  Value stored for each unique polytope in the hash map
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Slim per-polytope record.  The ws-5d dataset is always a SINGLE weight
+   system (1x6 weights, degree = sum), so the general combined-CWS grid
+   (nw/N/structure_id/profile_id and the [5][10] weight matrix) is dropped —
+   it was ~85% zero padding.  Only the six representative weights are kept.
+   The reflexive-only fields (dual_point_count, h11/h12/h13) remain so the
+   classifier still supports reflexive input; they are 0 and omitted from the
+   output under --non-reflexive. */
 struct PolytopeInfo {
     uint64_t count;               /* how many CWS generate this polytope    */
-    int32_t  schema_version;      /* input schema used for first CWS        */
-    int32_t  first_structure_id;  /* 1 for legacy single-weight rows        */
-    int32_t  first_profile_id;    /* profile bucket for structure_id        */
-    int32_t  first_nw;            /* number of CWS rows                     */
-    int32_t  first_N;             /* ambient homogeneous coordinates        */
-    int64_t  first_source_index;  /* row index/provenance from input        */
-    int32_t  first_degrees[PALP_API_MAX_CWS];
-    int32_t  first_cws_weights[PALP_API_MAX_CWS][PALP_API_MAX_COORDS];
-    int32_t  first_weights[6];    /* legacy compatibility projection        */
+    int64_t  source_index;        /* row index/provenance of representative */
+    int32_t  weights[6];          /* the single weight system [w0..w5]      */
     int16_t  vertex_count;
     int16_t  facet_count;
     int32_t  point_count;
-    int32_t  dual_point_count;
-    int16_t  h11, h12, h13;
+    int32_t  dual_point_count;    /* reflexive-only (0 for non-reflexive)   */
+    int16_t  h11, h12, h13;       /* reflexive-only (0 for non-reflexive)   */
 };
 
 using PolytopeMap = std::unordered_map<Hash128, PolytopeInfo, Hash128Hasher>;
@@ -352,25 +352,11 @@ struct CWSRow {
 };
 
 static void fill_first_cws_info(PolytopeInfo &info, const CWSRow &row) {
-    info.schema_version = row.schema_version;
-    info.first_structure_id = row.structure_id;
-    info.first_profile_id = row.profile_id;
-    info.first_nw = row.cws.nw;
-    info.first_N = row.cws.N;
-    info.first_source_index = row.source_index;
-
-    std::memset(info.first_degrees, 0, sizeof(info.first_degrees));
-    std::memset(info.first_cws_weights, 0, sizeof(info.first_cws_weights));
-    std::memset(info.first_weights, 0, sizeof(info.first_weights));
-
-    for (int r = 0; r < row.cws.nw && r < PALP_API_MAX_CWS; r++) {
-        info.first_degrees[r] = row.cws.degree[r];
-        for (int c = 0; c < row.cws.N && c < PALP_API_MAX_COORDS; c++) {
-            info.first_cws_weights[r][c] = row.cws.weights[r][c];
-            if (r == 0 && c < 6)
-                info.first_weights[c] = row.cws.weights[r][c];
-        }
-    }
+    /* Single weight system: record its provenance and the six weights. */
+    info.source_index = row.source_index;
+    std::memset(info.weights, 0, sizeof(info.weights));
+    for (int c = 0; c < row.cws.N && c < 6; c++)
+        info.weights[c] = row.cws.weights[0][c];
 }
 
 static void process_batch(const std::vector<CWSRow> &rows,
@@ -623,37 +609,24 @@ static std::vector<CWSRow> read_parquet_file(const fs::path &path,
 static void write_results(const PolytopeMap &global_map,
                           const fs::path &output_path,
                           bool non_reflexive = false) {
-    /* Build schema. Non-reflexive IP weight systems have no lattice dual, so the
-       dual_point_count and Hodge (h11/h12/h13) columns are meaningless and are
-       omitted; everything else (NF-derived geometry + provenance) is identical. */
+    /* Slim single-weight-system schema.  degree = sum(weights) is derivable and
+       not stored.  Non-reflexive input has no lattice dual, so dual_point_count
+       and Hodge (h11/h12/h13) are omitted. */
     std::vector<std::shared_ptr<arrow::Field>> fields = {
-        arrow::field("hash_lo",           arrow::uint64()),
-        arrow::field("hash_hi",           arrow::uint64()),
-        arrow::field("count",             arrow::uint64()),
-        arrow::field("schema_version",    arrow::int32()),
-        arrow::field("first_structure_id", arrow::int32()),
-        arrow::field("first_profile_id",  arrow::int32()),
-        arrow::field("first_nw",          arrow::int32()),
-        arrow::field("first_N",           arrow::int32()),
-        arrow::field("first_source_index", arrow::int64()),
+        arrow::field("hash_lo",       arrow::uint64()),
+        arrow::field("hash_hi",       arrow::uint64()),
+        arrow::field("count",         arrow::uint64()),
+        arrow::field("source_index",  arrow::int64()),
+        arrow::field("weight0",       arrow::int32()),
+        arrow::field("weight1",       arrow::int32()),
+        arrow::field("weight2",       arrow::int32()),
+        arrow::field("weight3",       arrow::int32()),
+        arrow::field("weight4",       arrow::int32()),
+        arrow::field("weight5",       arrow::int32()),
+        arrow::field("vertex_count",  arrow::int16()),
+        arrow::field("facet_count",   arrow::int16()),
+        arrow::field("point_count",   arrow::int32()),
     };
-    for (int r = 0; r < PALP_API_MAX_CWS; r++)
-        fields.push_back(arrow::field("first_degree" + std::to_string(r), arrow::int32()));
-    for (int r = 0; r < PALP_API_MAX_CWS; r++)
-        for (int c = 0; c < PALP_API_MAX_COORDS; c++)
-            fields.push_back(arrow::field("first_weight" + std::to_string(r) + "_" +
-                                          std::to_string(c), arrow::int32()));
-    fields.insert(fields.end(), {
-        arrow::field("first_weight0",     arrow::int32()),
-        arrow::field("first_weight1",     arrow::int32()),
-        arrow::field("first_weight2",     arrow::int32()),
-        arrow::field("first_weight3",     arrow::int32()),
-        arrow::field("first_weight4",     arrow::int32()),
-        arrow::field("first_weight5",     arrow::int32()),
-        arrow::field("vertex_count",      arrow::int16()),
-        arrow::field("facet_count",       arrow::int16()),
-        arrow::field("point_count",       arrow::int32()),
-    });
     if (!non_reflexive)
         fields.insert(fields.end(), {
             arrow::field("dual_point_count",  arrow::int32()),
@@ -663,27 +636,15 @@ static void write_results(const PolytopeMap &global_map,
         });
     auto schema = arrow::schema(fields);
 
-    /* Build arrays from the map */
     arrow::UInt64Builder  hash_lo_b, hash_hi_b, count_b;
-    arrow::Int32Builder   schema_b, sid_b, pid_b, nw_b, N_b;
     arrow::Int64Builder   source_b;
-    std::array<arrow::Int32Builder, PALP_API_MAX_CWS> degree_b;
-    std::array<std::array<arrow::Int32Builder, PALP_API_MAX_COORDS>, PALP_API_MAX_CWS> cws_weight_b;
     arrow::Int32Builder   w0_b, w1_b, w2_b, w3_b, w4_b, w5_b;
     arrow::Int16Builder   vc_b, fc_b, h11_b, h12_b, h13_b;
     arrow::Int32Builder   pc_b, dpc_b;
 
     int64_t n = static_cast<int64_t>(global_map.size());
     CHECK_ARROW(hash_lo_b.Reserve(n));  CHECK_ARROW(hash_hi_b.Reserve(n));
-    CHECK_ARROW(count_b.Reserve(n));
-    CHECK_ARROW(schema_b.Reserve(n)); CHECK_ARROW(sid_b.Reserve(n));
-    CHECK_ARROW(pid_b.Reserve(n)); CHECK_ARROW(nw_b.Reserve(n));
-    CHECK_ARROW(N_b.Reserve(n)); CHECK_ARROW(source_b.Reserve(n));
-    for (int r = 0; r < PALP_API_MAX_CWS; r++)
-        CHECK_ARROW(degree_b[r].Reserve(n));
-    for (int r = 0; r < PALP_API_MAX_CWS; r++)
-        for (int c = 0; c < PALP_API_MAX_COORDS; c++)
-            CHECK_ARROW(cws_weight_b[r][c].Reserve(n));
+    CHECK_ARROW(count_b.Reserve(n));    CHECK_ARROW(source_b.Reserve(n));
     CHECK_ARROW(w0_b.Reserve(n));  CHECK_ARROW(w1_b.Reserve(n));
     CHECK_ARROW(w2_b.Reserve(n));  CHECK_ARROW(w3_b.Reserve(n));
     CHECK_ARROW(w4_b.Reserve(n));  CHECK_ARROW(w5_b.Reserve(n));
@@ -696,23 +657,13 @@ static void write_results(const PolytopeMap &global_map,
         CHECK_ARROW(hash_lo_b.Append(key.lo));
         CHECK_ARROW(hash_hi_b.Append(key.hi));
         CHECK_ARROW(count_b.Append(info.count));
-        CHECK_ARROW(schema_b.Append(info.schema_version));
-        CHECK_ARROW(sid_b.Append(info.first_structure_id));
-        CHECK_ARROW(pid_b.Append(info.first_profile_id));
-        CHECK_ARROW(nw_b.Append(info.first_nw));
-        CHECK_ARROW(N_b.Append(info.first_N));
-        CHECK_ARROW(source_b.Append(info.first_source_index));
-        for (int r = 0; r < PALP_API_MAX_CWS; r++)
-            CHECK_ARROW(degree_b[r].Append(info.first_degrees[r]));
-        for (int r = 0; r < PALP_API_MAX_CWS; r++)
-            for (int c = 0; c < PALP_API_MAX_COORDS; c++)
-                CHECK_ARROW(cws_weight_b[r][c].Append(info.first_cws_weights[r][c]));
-        CHECK_ARROW(w0_b.Append(info.first_weights[0]));
-        CHECK_ARROW(w1_b.Append(info.first_weights[1]));
-        CHECK_ARROW(w2_b.Append(info.first_weights[2]));
-        CHECK_ARROW(w3_b.Append(info.first_weights[3]));
-        CHECK_ARROW(w4_b.Append(info.first_weights[4]));
-        CHECK_ARROW(w5_b.Append(info.first_weights[5]));
+        CHECK_ARROW(source_b.Append(info.source_index));
+        CHECK_ARROW(w0_b.Append(info.weights[0]));
+        CHECK_ARROW(w1_b.Append(info.weights[1]));
+        CHECK_ARROW(w2_b.Append(info.weights[2]));
+        CHECK_ARROW(w3_b.Append(info.weights[3]));
+        CHECK_ARROW(w4_b.Append(info.weights[4]));
+        CHECK_ARROW(w5_b.Append(info.weights[5]));
         CHECK_ARROW(vc_b.Append(info.vertex_count));
         CHECK_ARROW(fc_b.Append(info.facet_count));
         CHECK_ARROW(pc_b.Append(info.point_count));
@@ -723,23 +674,12 @@ static void write_results(const PolytopeMap &global_map,
     }
 
     std::shared_ptr<arrow::Array>
-        a_hlo, a_hhi, a_cnt,
-        a_schema, a_sid, a_pid, a_nw, a_N, a_source,
+        a_hlo, a_hhi, a_cnt, a_source,
         a_w0, a_w1, a_w2, a_w3, a_w4, a_w5,
         a_vc, a_fc, a_pc, a_dpc, a_h11, a_h12, a_h13;
-    std::array<std::shared_ptr<arrow::Array>, PALP_API_MAX_CWS> a_degree;
-    std::array<std::array<std::shared_ptr<arrow::Array>, PALP_API_MAX_COORDS>, PALP_API_MAX_CWS> a_cws_weight;
 
     CHECK_ARROW(hash_lo_b.Finish(&a_hlo)); CHECK_ARROW(hash_hi_b.Finish(&a_hhi));
-    CHECK_ARROW(count_b.Finish(&a_cnt));
-    CHECK_ARROW(schema_b.Finish(&a_schema)); CHECK_ARROW(sid_b.Finish(&a_sid));
-    CHECK_ARROW(pid_b.Finish(&a_pid)); CHECK_ARROW(nw_b.Finish(&a_nw));
-    CHECK_ARROW(N_b.Finish(&a_N)); CHECK_ARROW(source_b.Finish(&a_source));
-    for (int r = 0; r < PALP_API_MAX_CWS; r++)
-        CHECK_ARROW(degree_b[r].Finish(&a_degree[r]));
-    for (int r = 0; r < PALP_API_MAX_CWS; r++)
-        for (int c = 0; c < PALP_API_MAX_COORDS; c++)
-            CHECK_ARROW(cws_weight_b[r][c].Finish(&a_cws_weight[r][c]));
+    CHECK_ARROW(count_b.Finish(&a_cnt));   CHECK_ARROW(source_b.Finish(&a_source));
     CHECK_ARROW(w0_b.Finish(&a_w0));  CHECK_ARROW(w1_b.Finish(&a_w1));
     CHECK_ARROW(w2_b.Finish(&a_w2));  CHECK_ARROW(w3_b.Finish(&a_w3));
     CHECK_ARROW(w4_b.Finish(&a_w4));  CHECK_ARROW(w5_b.Finish(&a_w5));
@@ -749,17 +689,10 @@ static void write_results(const PolytopeMap &global_map,
     CHECK_ARROW(h13_b.Finish(&a_h13));
 
     std::vector<std::shared_ptr<arrow::Array>> arrays = {
-        a_hlo, a_hhi, a_cnt, a_schema, a_sid, a_pid, a_nw, a_N, a_source,
-    };
-    for (int r = 0; r < PALP_API_MAX_CWS; r++)
-        arrays.push_back(a_degree[r]);
-    for (int r = 0; r < PALP_API_MAX_CWS; r++)
-        for (int c = 0; c < PALP_API_MAX_COORDS; c++)
-            arrays.push_back(a_cws_weight[r][c]);
-    arrays.insert(arrays.end(), {
+        a_hlo, a_hhi, a_cnt, a_source,
         a_w0, a_w1, a_w2, a_w3, a_w4, a_w5,
         a_vc, a_fc, a_pc,
-    });
+    };
     if (!non_reflexive)
         arrays.insert(arrays.end(), { a_dpc, a_h11, a_h12, a_h13 });
     auto table = arrow::Table::Make(schema, arrays);
@@ -1137,33 +1070,20 @@ static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
 
     /* ── Parquet writer ─────────────────────────────────────────────────── */
     std::vector<std::shared_ptr<arrow::Field>> merge_fields = {
-        arrow::field("hash_lo",          arrow::uint64()),
-        arrow::field("hash_hi",          arrow::uint64()),
-        arrow::field("count",            arrow::uint64()),
-        arrow::field("schema_version",   arrow::int32()),
-        arrow::field("first_structure_id", arrow::int32()),
-        arrow::field("first_profile_id", arrow::int32()),
-        arrow::field("first_nw",         arrow::int32()),
-        arrow::field("first_N",          arrow::int32()),
-        arrow::field("first_source_index", arrow::int64()),
+        arrow::field("hash_lo",       arrow::uint64()),
+        arrow::field("hash_hi",       arrow::uint64()),
+        arrow::field("count",         arrow::uint64()),
+        arrow::field("source_index",  arrow::int64()),
+        arrow::field("weight0",       arrow::int32()),
+        arrow::field("weight1",       arrow::int32()),
+        arrow::field("weight2",       arrow::int32()),
+        arrow::field("weight3",       arrow::int32()),
+        arrow::field("weight4",       arrow::int32()),
+        arrow::field("weight5",       arrow::int32()),
+        arrow::field("vertex_count",  arrow::int16()),
+        arrow::field("facet_count",   arrow::int16()),
+        arrow::field("point_count",   arrow::int32()),
     };
-    for (int r = 0; r < PALP_API_MAX_CWS; r++)
-        merge_fields.push_back(arrow::field("first_degree" + std::to_string(r), arrow::int32()));
-    for (int r = 0; r < PALP_API_MAX_CWS; r++)
-        for (int c = 0; c < PALP_API_MAX_COORDS; c++)
-            merge_fields.push_back(arrow::field("first_weight" + std::to_string(r) + "_" +
-                                                std::to_string(c), arrow::int32()));
-    merge_fields.insert(merge_fields.end(), {
-        arrow::field("first_weight0",    arrow::int32()),
-        arrow::field("first_weight1",    arrow::int32()),
-        arrow::field("first_weight2",    arrow::int32()),
-        arrow::field("first_weight3",    arrow::int32()),
-        arrow::field("first_weight4",    arrow::int32()),
-        arrow::field("first_weight5",    arrow::int32()),
-        arrow::field("vertex_count",     arrow::int16()),
-        arrow::field("facet_count",      arrow::int16()),
-        arrow::field("point_count",      arrow::int32()),
-    });
     if (!non_reflexive)
         merge_fields.insert(merge_fields.end(), {
             arrow::field("dual_point_count", arrow::int32()),
@@ -1185,10 +1105,7 @@ static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
     auto pq_writer = std::move(pq_r).ValueOrDie();
 
     arrow::UInt64Builder hash_lo_b, hash_hi_b, count_b;
-    arrow::Int32Builder  schema_b, sid_b, pid_b, nw_b, N_b;
     arrow::Int64Builder  source_b;
-    std::array<arrow::Int32Builder, PALP_API_MAX_CWS> degree_b;
-    std::array<std::array<arrow::Int32Builder, PALP_API_MAX_COORDS>, PALP_API_MAX_CWS> cws_weight_b;
     arrow::Int32Builder  w0_b, w1_b, w2_b, w3_b, w4_b, w5_b, pc_b, dpc_b;
     arrow::Int16Builder  vc_b, fc_b, h11_b, h12_b, h13_b;
     int64_t pq_n = 0;
@@ -1197,21 +1114,11 @@ static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
     auto flush_pq = [&]() {
         if (pq_n == 0) return;
         std::shared_ptr<arrow::Array>
-            a_hlo, a_hhi, a_cnt, a_schema, a_sid, a_pid, a_nw, a_N, a_source,
+            a_hlo, a_hhi, a_cnt, a_source,
             a_w0, a_w1, a_w2, a_w3, a_w4, a_w5,
             a_vc, a_fc, a_pc, a_dpc, a_h11, a_h12, a_h13;
-        std::array<std::shared_ptr<arrow::Array>, PALP_API_MAX_CWS> a_degree;
-        std::array<std::array<std::shared_ptr<arrow::Array>, PALP_API_MAX_COORDS>, PALP_API_MAX_CWS> a_cws_weight;
         CHECK_ARROW(hash_lo_b.Finish(&a_hlo)); CHECK_ARROW(hash_hi_b.Finish(&a_hhi));
-        CHECK_ARROW(count_b.Finish(&a_cnt));
-        CHECK_ARROW(schema_b.Finish(&a_schema)); CHECK_ARROW(sid_b.Finish(&a_sid));
-        CHECK_ARROW(pid_b.Finish(&a_pid)); CHECK_ARROW(nw_b.Finish(&a_nw));
-        CHECK_ARROW(N_b.Finish(&a_N)); CHECK_ARROW(source_b.Finish(&a_source));
-        for (int r = 0; r < PALP_API_MAX_CWS; r++)
-            CHECK_ARROW(degree_b[r].Finish(&a_degree[r]));
-        for (int r = 0; r < PALP_API_MAX_CWS; r++)
-            for (int c = 0; c < PALP_API_MAX_COORDS; c++)
-                CHECK_ARROW(cws_weight_b[r][c].Finish(&a_cws_weight[r][c]));
+        CHECK_ARROW(count_b.Finish(&a_cnt));   CHECK_ARROW(source_b.Finish(&a_source));
         CHECK_ARROW(w0_b.Finish(&a_w0)); CHECK_ARROW(w1_b.Finish(&a_w1));
         CHECK_ARROW(w2_b.Finish(&a_w2)); CHECK_ARROW(w3_b.Finish(&a_w3));
         CHECK_ARROW(w4_b.Finish(&a_w4)); CHECK_ARROW(w5_b.Finish(&a_w5));
@@ -1220,15 +1127,8 @@ static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
         CHECK_ARROW(h11_b.Finish(&a_h11)); CHECK_ARROW(h12_b.Finish(&a_h12));
         CHECK_ARROW(h13_b.Finish(&a_h13));
         std::vector<std::shared_ptr<arrow::Array>> batch_arrays = {
-            a_hlo, a_hhi, a_cnt, a_schema, a_sid, a_pid, a_nw, a_N, a_source,
-        };
-        for (int r = 0; r < PALP_API_MAX_CWS; r++)
-            batch_arrays.push_back(a_degree[r]);
-        for (int r = 0; r < PALP_API_MAX_CWS; r++)
-            for (int c = 0; c < PALP_API_MAX_COORDS; c++)
-                batch_arrays.push_back(a_cws_weight[r][c]);
-        batch_arrays.insert(batch_arrays.end(), {
-            a_w0, a_w1, a_w2, a_w3, a_w4, a_w5, a_vc, a_fc, a_pc});
+            a_hlo, a_hhi, a_cnt, a_source,
+            a_w0, a_w1, a_w2, a_w3, a_w4, a_w5, a_vc, a_fc, a_pc};
         if (!non_reflexive)
             batch_arrays.insert(batch_arrays.end(), {a_dpc, a_h11, a_h12, a_h13});
         auto batch = arrow::RecordBatch::Make(schema, pq_n, batch_arrays);
@@ -1238,23 +1138,13 @@ static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
     auto emit = [&](const Hash128 &key, const PolytopeInfo &info) {
         CHECK_ARROW(hash_lo_b.Append(key.lo));   CHECK_ARROW(hash_hi_b.Append(key.hi));
         CHECK_ARROW(count_b.Append(info.count));
-        CHECK_ARROW(schema_b.Append(info.schema_version));
-        CHECK_ARROW(sid_b.Append(info.first_structure_id));
-        CHECK_ARROW(pid_b.Append(info.first_profile_id));
-        CHECK_ARROW(nw_b.Append(info.first_nw));
-        CHECK_ARROW(N_b.Append(info.first_N));
-        CHECK_ARROW(source_b.Append(info.first_source_index));
-        for (int r = 0; r < PALP_API_MAX_CWS; r++)
-            CHECK_ARROW(degree_b[r].Append(info.first_degrees[r]));
-        for (int r = 0; r < PALP_API_MAX_CWS; r++)
-            for (int c = 0; c < PALP_API_MAX_COORDS; c++)
-                CHECK_ARROW(cws_weight_b[r][c].Append(info.first_cws_weights[r][c]));
-        CHECK_ARROW(w0_b.Append(info.first_weights[0]));
-        CHECK_ARROW(w1_b.Append(info.first_weights[1]));
-        CHECK_ARROW(w2_b.Append(info.first_weights[2]));
-        CHECK_ARROW(w3_b.Append(info.first_weights[3]));
-        CHECK_ARROW(w4_b.Append(info.first_weights[4]));
-        CHECK_ARROW(w5_b.Append(info.first_weights[5]));
+        CHECK_ARROW(source_b.Append(info.source_index));
+        CHECK_ARROW(w0_b.Append(info.weights[0]));
+        CHECK_ARROW(w1_b.Append(info.weights[1]));
+        CHECK_ARROW(w2_b.Append(info.weights[2]));
+        CHECK_ARROW(w3_b.Append(info.weights[3]));
+        CHECK_ARROW(w4_b.Append(info.weights[4]));
+        CHECK_ARROW(w5_b.Append(info.weights[5]));
         CHECK_ARROW(vc_b.Append(info.vertex_count));
         CHECK_ARROW(fc_b.Append(info.facet_count));
         CHECK_ARROW(pc_b.Append(info.point_count));
