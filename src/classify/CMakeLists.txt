@@ -129,4 +129,23 @@ target_include_directories(nf_dump PRIVATE ${PALP_DIR} ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(nf_dump PRIVATE palp -flto)
 target_link_options(nf_dump PRIVATE ${PGO_FLAGS})
 
-install(TARGETS classifier nf_dump RUNTIME DESTINATION bin)
+# ── add_nf enrichment tool ─────────────────────────────────────────────────
+# Re-runs the PALP NF for each unique polytope and appends an nf_vertices column
+# to unique_polytopes.parquet. Schema-agnostic (AddColumn on the input table),
+# so it works on both reflexive and --non-reflexive classifier output.
+add_executable(add_nf add_nf.cpp)
+target_compile_options(add_nf PRIVATE
+    -O3 -march=native -flto -funroll-loops
+    ${PALP_DEFINES} ${PGO_FLAGS}
+)
+target_include_directories(add_nf PRIVATE ${PALP_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(add_nf PRIVATE
+    palp
+    Arrow::arrow_shared
+    Parquet::parquet_shared
+    Threads::Threads
+    -flto
+)
+target_link_options(add_nf PRIVATE ${PGO_FLAGS})
+
+install(TARGETS classifier nf_dump add_nf RUNTIME DESTINATION bin)
