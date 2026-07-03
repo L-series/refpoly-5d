@@ -25,7 +25,10 @@ Both variants run through the **same** pipeline:
    two-phase external sort-merge across distributed compute nodes.
 
 The output is a single deduplicated catalogue of unique polytopes with frequency
-counts and topological metadata (vertex/facet/point counts, Hodge numbers).
+counts and geometry metadata (vertex/facet/point counts). For the **reflexive**
+variant the catalogue also carries the lattice-dual metadata (dual point count,
+Hodge numbers `h11/h12/h13`); for the **non-reflexive** variant — which has no
+lattice dual — those columns are omitted (pass `--non-reflexive`, see below).
 
 ## Structure
 
@@ -36,8 +39,13 @@ refpoly-5d/
 │   ├── palp_api.h            thread-safe C wrapper around PALP's NF routines
 │   ├── geometry_backend.*    CPU backend (CUDA path compiled out here)
 │   ├── nf_dump.cpp           diagnostic: prints the NF the classifier computes
-│   ├── CMakeLists.txt        CPU-only build
+│   ├── CMakeLists.txt        CPU-only build (SIMD/PGO/LLL+FP toggles)
 │   └── build.sh              convenience build wrapper
+├── src/process/      standalone parquet post-processing tools (no PALP dep)
+│   ├── concat_parquet.cpp    concatenate a part-*.parquet dataset into one file
+│   ├── merge_computed.cpp    join in cleaned Hodge columns (reflexive workflow)
+│   └── build.sh              convenience build wrapper
+├── docs/             OPTIMIZATIONS.md — SIMD/PGO/LLL+FP results and build flags
 ├── tests/            normal-form correctness gate (PALP poly.x oracle + golden)
 ├── bench/            WS → NF → hash benchmark harness with per-host baseline
 ├── scripts/          dataset download (HuggingFace) + build-env helper
@@ -81,6 +89,16 @@ source scripts/env.sh
 ./src/classify/build.sh          # -> src/classify/build/classifier (+ nf_dump)
 ```
 
+The AVX-512 SIMD hull scan is **on by default** (+21–25% single-core; auto-falls
+back to scalar without AVX-512). Optional flags: `--no-simd`, `--pgo`,
+`--lllfp` — see [`docs/OPTIMIZATIONS.md`](docs/OPTIMIZATIONS.md).
+
+The standalone parquet tools build separately:
+
+```bash
+./src/process/build.sh           # -> src/process/build/{concat_parquet,merge_computed}
+```
+
 ### 4. Download data
 
 The dataset is public; a HuggingFace token (optional, avoids rate limits) is
@@ -98,9 +116,24 @@ python scripts/download_ws5d.py --variant non-reflexive --start 0 --end 99  # a 
 # benchmark on 100k rows
 ./src/classify/build/classifier --input data/ws-5d-non-reflexive --output results --benchmark 100000
 
-# process a shard range across runners
+# process the non-reflexive shards across runners (omits dual/Hodge columns)
 ./src/classify/build/classifier --input data/ws-5d-non-reflexive --output results \
+    --non-reflexive --start 0 --end 999 --threads 32
+
+# the reflexive variant (default schema, with dual point count + Hodge numbers)
+./src/classify/build/classifier --input data/ws-5d-reflexive --output results \
     --start 0 --end 999 --threads 32
+```
+
+The pipeline is identical for both variants; `--non-reflexive` only drops the
+lattice-dual output columns (`dual_point_count`, `h11/h12/h13`) that are
+undefined for non-reflexive polytopes. `--merge <dir>` (checkpoint merge) takes
+the same flag so its output schema matches.
+
+Concatenate a sharded result dataset into one file with the process tools:
+
+```bash
+./src/process/build/concat_parquet results/parts results/unique_polytopes.parquet
 ```
 
 ## Testing & benchmarking
