@@ -94,6 +94,8 @@ struct Config {
     int         name_offset     = -1;  /* global index offset for checkpoint naming */
     bool        resume          = false;
     bool        assume_sorted   = false;  /* skip Phase 1, treat all shards as sorted */
+    bool        non_reflexive   = false;  /* input is non-reflexive IP WS: omit the
+                                             reflexive-only Hodge/dual output columns */
     bool        benchmark_only  = false;
     int64_t     benchmark_rows  = 0;   /* 0 = all rows in first file */
     int64_t     max_rows_per_file = 0; /* 0 = unlimited               */
@@ -610,8 +612,11 @@ static std::vector<CWSRow> read_parquet_file(const fs::path &path,
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void write_results(const PolytopeMap &global_map,
-                          const fs::path &output_path) {
-    /* Build schema */
+                          const fs::path &output_path,
+                          bool non_reflexive = false) {
+    /* Build schema. Non-reflexive IP weight systems have no lattice dual, so the
+       dual_point_count and Hodge (h11/h12/h13) columns are meaningless and are
+       omitted; everything else (NF-derived geometry + provenance) is identical. */
     std::vector<std::shared_ptr<arrow::Field>> fields = {
         arrow::field("hash_lo",           arrow::uint64()),
         arrow::field("hash_hi",           arrow::uint64()),
@@ -639,11 +644,14 @@ static void write_results(const PolytopeMap &global_map,
         arrow::field("vertex_count",      arrow::int16()),
         arrow::field("facet_count",       arrow::int16()),
         arrow::field("point_count",       arrow::int32()),
-        arrow::field("dual_point_count",  arrow::int32()),
-        arrow::field("h11",               arrow::int16()),
-        arrow::field("h12",               arrow::int16()),
-        arrow::field("h13",               arrow::int16()),
     });
+    if (!non_reflexive)
+        fields.insert(fields.end(), {
+            arrow::field("dual_point_count",  arrow::int32()),
+            arrow::field("h11",               arrow::int16()),
+            arrow::field("h12",               arrow::int16()),
+            arrow::field("h13",               arrow::int16()),
+        });
     auto schema = arrow::schema(fields);
 
     /* Build arrays from the map */
@@ -741,8 +749,10 @@ static void write_results(const PolytopeMap &global_map,
             arrays.push_back(a_cws_weight[r][c]);
     arrays.insert(arrays.end(), {
         a_w0, a_w1, a_w2, a_w3, a_w4, a_w5,
-        a_vc, a_fc, a_pc, a_dpc, a_h11, a_h12, a_h13
+        a_vc, a_fc, a_pc,
     });
+    if (!non_reflexive)
+        arrays.insert(arrays.end(), { a_dpc, a_h11, a_h12, a_h13 });
     auto table = arrow::Table::Make(schema, arrays);
 
     /* Write */
@@ -986,7 +996,8 @@ static uint64_t merge_batch_to_file(
 static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
                                const fs::path &output_path,
                                int n_threads,
-                               bool assume_sorted = false) {
+                               bool assume_sorted = false,
+                               bool non_reflexive = false) {
     auto t_total = std::chrono::steady_clock::now();
     const size_t n_shards = shard_paths.size();
 
@@ -1142,11 +1153,14 @@ static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
         arrow::field("vertex_count",     arrow::int16()),
         arrow::field("facet_count",      arrow::int16()),
         arrow::field("point_count",      arrow::int32()),
-        arrow::field("dual_point_count", arrow::int32()),
-        arrow::field("h11",              arrow::int16()),
-        arrow::field("h12",              arrow::int16()),
-        arrow::field("h13",              arrow::int16()),
     });
+    if (!non_reflexive)
+        merge_fields.insert(merge_fields.end(), {
+            arrow::field("dual_point_count", arrow::int32()),
+            arrow::field("h11",              arrow::int16()),
+            arrow::field("h12",              arrow::int16()),
+            arrow::field("h13",              arrow::int16()),
+        });
     auto schema = arrow::schema(merge_fields);
     auto writer_props = parquet::WriterProperties::Builder()
         .compression(parquet::Compression::ZSTD)
@@ -1204,8 +1218,9 @@ static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
             for (int c = 0; c < PALP_API_MAX_COORDS; c++)
                 batch_arrays.push_back(a_cws_weight[r][c]);
         batch_arrays.insert(batch_arrays.end(), {
-            a_w0, a_w1, a_w2, a_w3, a_w4, a_w5,
-            a_vc, a_fc, a_pc, a_dpc, a_h11, a_h12, a_h13});
+            a_w0, a_w1, a_w2, a_w3, a_w4, a_w5, a_vc, a_fc, a_pc});
+        if (!non_reflexive)
+            batch_arrays.insert(batch_arrays.end(), {a_dpc, a_h11, a_h12, a_h13});
         auto batch = arrow::RecordBatch::Make(schema, pq_n, batch_arrays);
         CHECK_ARROW(pq_writer->WriteRecordBatch(*batch));
         pq_n = 0;
@@ -1460,8 +1475,9 @@ static size_t get_rss_bytes() {
 static void usage(const char *argv0) {
     std::cerr
         << "Usage: " << argv0 << "\n"
-        << "  --input   <dir>   Directory containing ws-5d-reflexive-*.parquet\n"
+        << "  --input   <dir>   Directory containing ws-5d-*.parquet\n"
         << "  --output  <dir>   Output directory for results\n"
+        << " [--non-reflexive] Input is non-reflexive IP WS: omit dual/Hodge columns\n"
         << " [--checkpoint <dir>] Directory for checkpoint files\n"
         << " [--offset <n>]    Global index offset for checkpoint file naming\n"
         << " [--threads <n>]   Thread count (default: hardware_concurrency)\n"
@@ -1503,6 +1519,7 @@ int main(int argc, char **argv) {
         else if (a == "--offset"      && i+1 < argc) cfg.name_offset    = std::stoi(argv[++i]);
         else if (a == "--resume")                     cfg.resume         = true;
         else if (a == "--assume-sorted")               cfg.assume_sorted  = true;
+        else if (a == "--non-reflexive")               cfg.non_reflexive  = true;
         else if (a == "--max-rows"    && i+1 < argc) cfg.max_rows_per_file = std::stoll(argv[++i]);
         else if (a == "--benchmark"   && i+1 < argc) {
             cfg.benchmark_only = true;
@@ -1525,7 +1542,7 @@ int main(int argc, char **argv) {
         if (shards.empty()) { std::cerr << "No .ckpt files in " << merge_dir << "\n"; return 1; }
         fs::create_directories(cfg.output_dir);
         merge_checkpoints(shards, fs::path(cfg.output_dir) / "unique_polytopes.parquet",
-                          cfg.n_threads, cfg.assume_sorted);
+                          cfg.n_threads, cfg.assume_sorted, cfg.non_reflexive);
         return 0;
     }
 
@@ -1705,7 +1722,7 @@ int main(int argc, char **argv) {
     /* Write final parquet */
     fs::path output_parquet = fs::path(cfg.output_dir) / "unique_polytopes.parquet";
     std::cerr << "\nWriting results to " << output_parquet.string() << " ...\n";
-    write_results(global_map, output_parquet);
+    write_results(global_map, output_parquet, cfg.non_reflexive);
 
     /* Write summary JSON */
     {
