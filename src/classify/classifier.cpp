@@ -170,6 +170,13 @@ struct MergeRecord {
    (needs 8-alignment), so there is no inter-member padding.  Verify: */
 static_assert(sizeof(MergeRecord) == sizeof(Hash128) + sizeof(PolytopeInfo),
               "MergeRecord must have no padding (matches checkpoint I/O format)");
+/* Absolute on-disk record size (schema v2).  CheckpointHeader.record_size is
+   written as sizeof(MergeRecord) and rejected on read if it differs, so this
+   locks the checkpoint format.  Verified here against the real GCC ABI because
+   CBMC's frontend under-models struct tail padding (see src/verify/). */
+static_assert(sizeof(Hash128) == 16,      "Hash128 must be 16 bytes");
+static_assert(sizeof(PolytopeInfo) == 64, "PolytopeInfo must be 64 bytes (slim v2)");
+static_assert(sizeof(MergeRecord) == 80,  "MergeRecord must be 80 bytes (slim v2)");
 
 static constexpr int32_t CLASSIFIER_SCHEMA_LEGACY = 1;
 static constexpr int32_t CLASSIFIER_SCHEMA_COMBINED = 2;
@@ -980,7 +987,11 @@ static void merge_checkpoints(const std::vector<fs::path> &shard_paths,
               << "  (peak sort RAM ≈ "
               << 2.0 * largest_shard_bytes / (1024.0*1024*1024) << " GB)\n\n";
 
-    if (2 * largest_shard_bytes > phys_bytes * 85ULL / 100)
+    /* The RAM guard only applies to Phase 1 (in-place sort), which loads and
+       sorts a whole shard in memory.  With --assume-sorted Phase 1 is skipped
+       and Phase 2 is a bounded-memory streaming k-way merge, so the largest
+       shard never has to fit in RAM.  Skip the guard in that case. */
+    if (!assume_sorted && 2 * largest_shard_bytes > phys_bytes * 85ULL / 100)
         throw std::runtime_error(
             "Largest shard needs ~" +
             std::to_string(2 * largest_shard_bytes / (1024*1024*1024)) +

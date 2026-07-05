@@ -19,6 +19,7 @@ extern "C" {
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <setjmp.h>
 
 /* ── Bring in the PALP type universe ────────────────────────────────────── */
 #include "../../PALP/Global.h"
@@ -36,6 +37,13 @@ void  Make_VEPM(PolyPointList *P, VertexNumList *V, EqList *E, PairMat PM);
 int   Make_Poly_Sym_NF(PolyPointList *P, VertexNumList *VNL, EqList *EL,
                         int *SymNum, int V_perm[][VERT_Nmax],
                         Long NF[POLY_Dmax][VERT_Nmax], int t, int S, int N);
+
+/* Per-thread abort guard (defined in PALP/Polynf.c).  When armed, a VM/VPM
+   envelope overflow inside the NF computation longjmps back here instead of
+   calling exit(), so a single pathological weight system fails gracefully
+   (result->ok == 0) rather than killing the whole batch. */
+extern __thread jmp_buf palp_nf_abort_env;
+extern __thread int     palp_nf_abort_armed;
 
 /* ── Result from a single CWS → NF computation ─────────────────────────── */
 typedef struct {
@@ -110,8 +118,16 @@ static inline void palp_run_nf_from_current_points(PalpWorkspace *ws,
 
     Sort_VL(&vertices);
 
+    /* Arm the abort guard so an envelope overflow inside Make_Poly_Sym_NF
+       fails this one polytope (result->ok stays 0) instead of exit()ing. */
+    palp_nf_abort_armed = 1;
+    if (setjmp(palp_nf_abort_env)) {
+        palp_nf_abort_armed = 0;
+        return;                 /* result->ok == 0: counted as a NF failure */
+    }
     Make_Poly_Sym_NF(points, &vertices, equations, &sym_num, ws->V_perm,
                      result->nf, 0, 0, 0);
+    palp_nf_abort_armed = 0;
 
     result->ok  = 1;
     result->dim = points->n;
