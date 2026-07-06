@@ -58,6 +58,11 @@ set(PALP_SOURCES
     ${PALP_DIR}/Vertex.c
     ${PALP_DIR}/Polynf.c
     ${PALP_DIR}/LG.c
+    # r-maximality test (Poly_Max_check / Start_Find_Ref_Subpoly / sublattices):
+    # class.x's object set is base + Subpoly + Subadd + Subdb (PALP GNUmakefile).
+    ${PALP_DIR}/Subpoly.c
+    ${PALP_DIR}/Subadd.c
+    ${PALP_DIR}/Subdb.c
 )
 
 # PALP build defines for the 5D classification envelope:
@@ -88,6 +93,18 @@ configure_file(
     COPYONLY
 )
 target_sources(palp PRIVATE "${CMAKE_BINARY_DIR}/palp_globals.c")
+
+# ── PALP variant for the r-maximality tools ────────────────────────────────
+# Same sources, but with MAXCHECK_BIG_ARRAYS: enlarged VERT_Nmax/EQUA_Nmax so
+# the dual-subpolytope search does not overflow on large duals (Global.h).
+add_library(palp_max STATIC ${PALP_SOURCES})
+target_compile_options(palp_max PRIVATE
+    -O3 -march=native -flto -funroll-loops -fomit-frame-pointer -w ${PGO_FLAGS})
+target_compile_definitions(palp_max PRIVATE ${PALP_DEFINES} -DMAXCHECK_BIG_ARRAYS
+    $<$<BOOL:${ENABLE_LLLFP}>:LLLFP_WALK>
+    $<$<BOOL:${ENABLE_SIMD_SCAN}>:PALP_SIMD_SCAN>)
+target_include_directories(palp_max PUBLIC ${PALP_DIR})
+target_sources(palp_max PRIVATE "${CMAKE_BINARY_DIR}/palp_globals.c")
 
 # ── Dependencies ───────────────────────────────────────────────────────────
 find_package(Arrow   REQUIRED)
@@ -148,4 +165,30 @@ target_link_libraries(add_nf PRIVATE
 )
 target_link_options(add_nf PRIVATE ${PGO_FLAGS})
 
-install(TARGETS classifier nf_dump add_nf RUNTIME DESTINATION bin)
+# ── maxcheck_cli: r-maximality test, stdin driver (validation, no Arrow) ────
+add_executable(maxcheck_cli maxcheck_cli.cpp)
+target_compile_options(maxcheck_cli PRIVATE
+    -O3 -march=native -flto -funroll-loops
+    ${PALP_DEFINES} -DMAXCHECK_BIG_ARRAYS ${PGO_FLAGS}
+)
+target_include_directories(maxcheck_cli PRIVATE ${PALP_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(maxcheck_cli PRIVATE palp_max -flto)
+target_link_options(maxcheck_cli PRIVATE ${PGO_FLAGS})
+
+# ── maxcheck: streaming r-maximality over the reflexive catalogue (Arrow) ────
+add_executable(maxcheck maxcheck.cpp)
+target_compile_options(maxcheck PRIVATE
+    -O3 -march=native -flto -funroll-loops
+    ${PALP_DEFINES} -DMAXCHECK_BIG_ARRAYS ${PGO_FLAGS}
+)
+target_include_directories(maxcheck PRIVATE ${PALP_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(maxcheck PRIVATE
+    palp_max
+    Arrow::arrow_shared
+    Parquet::parquet_shared
+    Threads::Threads
+    -flto
+)
+target_link_options(maxcheck PRIVATE ${PGO_FLAGS})
+
+install(TARGETS classifier nf_dump add_nf maxcheck maxcheck_cli RUNTIME DESTINATION bin)

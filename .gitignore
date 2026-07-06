@@ -10,6 +10,7 @@ latex/paper/
 
 # Build artefacts
 src/classify/build/
+src/classify/build-max/
 build/
 
 # Downloaded datasets and pipeline outputs (large; not versioned)
