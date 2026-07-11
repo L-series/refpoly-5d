@@ -12,7 +12,7 @@ arising from weight systems in the [ws-5d dataset](https://huggingface.co/datase
 shards of IP weight systems:
 
 - **reflexive** (~185B weight systems) — classified in the predecessor project;
-- **non-reflexive** (~135B weight systems) — the current target of this repo,
+- **non-reflexive** (~137B weight systems) — the current target of this repo,
   since these also yield interesting polytopes.
 
 Both variants run through the **same** pipeline:
